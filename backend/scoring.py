@@ -39,9 +39,9 @@ def nearest_station_distances(tracts, stations):
     lat, lon, valid = _coordinate_arrays(tracts)
     station_lat, station_lon, station_valid = _coordinate_arrays(stations)
     if "coordinates_valid" in stations:
-        station_valid &= stations.coordinates_valid.fillna(False).to_numpy(dtype=bool)
+        station_valid = station_valid & stations.coordinates_valid.fillna(False).to_numpy(dtype=bool)
     if "geometry_status" in tracts:
-        valid &= tracts.geometry_status.eq("valid").fillna(False).to_numpy(dtype=bool)
+        valid = valid & tracts.geometry_status.eq("valid").fillna(False).to_numpy(dtype=bool)
     if not station_valid.any():
         raise ValueError("At least one station with valid coordinates is required")
     slat = np.radians(station_lat[station_valid])[None, :]

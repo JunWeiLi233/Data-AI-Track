@@ -17,11 +17,64 @@ entrances = data.entrances
 tracts = data.tracts
 ```
 
-All outputs are pandas DataFrames except `report`, a dictionary suitable for
-Streamlit display. The default data path is relative to this module, independent
-of the frontend's working directory. Loaders only read CSVs and never save them.
-Individual functions are also public: `load_stations`, `load_entrances`,
-`load_tracts`, and `load_demographics`.
+## Frontend
+
+```sh
+python -m backend.server  # then open http://127.0.0.1:8000
+```
+
+`backend/server.py` (standard library only) serves `frontend/` and JSON
+endpoints built in `backend/api.py`; data is loaded once per process:
+
+- `/api/summary`: headline counts from `load_data`.
+- `/api/tracts`: tract GeoJSON with residents per km² (area measured in
+  EPSG:2263; polygons simplified for display only) and quartile class breaks.
+- `/api/stations`: the 496 physical station locations.
+- `/api/lines`: existing lines from `backend/network.py` (below).
+- `/api/deserts`: merged outline of residential tracts more than 1.2 km
+  (a 15-minute walk) from every station in the baseline scoring.
+- `/api/recommendations?goal=access|eff&n=1..10&along=1|0&spacing=km&budget=Low|Medium|High`:
+  `backend/optimizer.py` output (below).
+
+The map is Leaflet 1.9.4 (from cdnjs) on OpenStreetMap tiles. OSM's volunteer
+tile servers suit development only; switch `TILE_URL` in `frontend/app.js` to a
+tile provider or self-hosted tiles before heavy use.
+
+### Existing line network (`backend/network.py`)
+
+The exports contain no track shapes. Each entrance-export station (one row per
+Division + Line + station coordinates) is matched to its GTFS parent location
+(median 0 m, maximum 0.46 km). Parents missing from the entrance export join the
+line of a same-prefix stop within 1.5 km, or a stop in the same complex within
+0.3 km; the Staten Island Railway and Second Avenue Subway, absent from the
+entrance export, form their own lines. Each line is the minimum spanning tree of
+its stations by haversine distance (links over 6 km are refused), which yields
+38 connected lines whose consecutive stations are linked. Routes are those at
+40% or more of a line's stations, since entrance rows also list transfer routes;
+the leading route sets the MTA color. Edges are straight station-to-station
+segments, not track alignments.
+
+### Station placement (`backend/optimizer.py`)
+
+Candidate sites lie every 200 m along line edges, on land (inside a tract
+polygon, so not on river crossings); when `along=0`, tract reference points
+off the network are added, with `offline_km` measuring new track to the
+nearest line. Budgets cap `offline_km` (Low 0, Medium 1.5, High 3 km); `along=1`
+forces 0. Sites must be `spacing` km (default 0.5) from existing and chosen
+stations. Greedy steps add the site with the largest marginal gain:
+
+- `access`: residents newly within 0.8 km, weighted by baseline
+  `priority_score` from `score_tracts` (distance, population, income).
+- `eff`: population-weighted reduction in nearest-station distance.
+
+Per-station `residents` are marginal (newly within 0.8 km when that station was
+added) and sum to `impact.residents_added`; `minutes_saved` is the
+population-weighted straight-line distance saved at 80 m per minute; `score` is
+the benefiting residents' mean baseline priority (0 to 100). `impact` is
+recomputed with `simulate_expansion` over all evaluable residential tracts.
+These are accessibility proxies, not ridership, travel-time or cost forecasts;
+fewer than `n` stations are returned when the constraints leave no site with a
+positive gain.
 
 ## Actual source schemas and cleaning
 
