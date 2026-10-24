@@ -1,18 +1,17 @@
-"""Connect to the team Snowflake account, upload cleaned tables, and check Cortex.
+"""Connect to the team Snowflake account, load the validated export tables, and check Cortex.
 
-Run from the repository root after filling in .env (see .env.example):
+Tables come from export_pipeline.prepare_exports() and are created with the
+Snowflake types declared in export_pipeline.SCHEMA. Run from the repository root
+after filling in .env (see .env.example):
 
-    python -m backend.snowflake_client            # upload tables + Cortex check
+    python -m backend.snowflake_client            # load tables + Cortex check
     python -m backend.snowflake_client --check    # connection + Cortex check only
 """
 import argparse
 import os
-import re
 from pathlib import Path
 
-import pandas as pd
-
-from backend.data_loader import load_data
+from .export_pipeline import SCHEMA, _json, prepare_exports
 
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 REQUIRED = ["SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER"]
@@ -54,38 +53,70 @@ def connect():
     return snowflake.connector.connect(**connection_settings())
 
 
-def to_snowflake_frame(frame):
-    """Make a loader DataFrame uploadable: plain-text columns, UPPER_SNAKE names.
+def _ident(name):
+    # Quoted upper case matches how Snowflake stores unquoted names, and keeps RANK safe.
+    return '"' + name.upper() + '"'
 
-    Shapely objects are dropped (tracts keep the original WKT in THE_GEOM) and
-    tuples of merged station IDs or names are joined with " | ".
+
+def create_table_sql(table):
+    """CREATE OR REPLACE with the export's declared types and NOT NULL contracts."""
+    columns = ",\n  ".join(f"{_ident(column)} {kind}{'' if nullable else ' NOT NULL'}"
+                           for column, (kind, nullable, _) in SCHEMA[table].items())
+    return f"CREATE OR REPLACE TABLE {_ident(table)} (\n  {columns}\n)"
+
+
+def staging_frame(table, frame):
+    """Upper-case columns; VARIANT values become strict JSON text for PARSE_JSON.
+
+    Missing scalars stay pandas NA, which Parquet carries as SQL NULL (never zero).
     """
-    frame = frame.drop(columns=["geometry"], errors="ignore").copy()
-    for column in frame.columns[frame.dtypes == object]:
-        frame[column] = frame[column].map(
-            lambda v: " | ".join(map(str, v)) if isinstance(v, tuple) else v).astype("string")
-    names = [re.sub(r"[^0-9A-Z]+", "_", str(c).upper()).strip("_") for c in frame.columns]
-    if len(set(names)) != len(names):
-        raise ValueError(f"Column names collide after cleaning: {names}")
-    frame.columns = names
+    frame = frame.copy()
+    for column, (kind, _, _) in SCHEMA[table].items():
+        if kind == "VARIANT":
+            frame[column] = frame[column].map(_json).astype("string")
+    frame.columns = [column.upper() for column in frame.columns]
     return frame
 
 
-def upload(conn, data=None):
-    """Replace STATIONS, ENTRANCES and TRACTS with freshly loaded data. Returns row counts."""
+def insert_sql(table, stage):
+    """Copy staged rows into the typed table, parsing VARIANT text and casting scalars."""
+    select = ", ".join(f"PARSE_JSON({_ident(column)})" if kind == "VARIANT" else f"{_ident(column)}::{kind}"
+                       for column, (kind, _, _) in SCHEMA[table].items())
+    return f"INSERT INTO {_ident(table)} SELECT {select} FROM {_ident(stage)}"
+
+
+def upload(conn, bundle=None):
+    """Replace the four export tables in the current schema. Returns loaded row counts.
+
+    Each table is staged in a temporary table, inserted with explicit types, and
+    its Snowflake row count is checked against the validated export.
+    """
     from snowflake.connector.pandas_tools import write_pandas
 
-    data = data or load_data()
+    bundle = bundle or prepare_exports()
+    cursor = conn.cursor()
     counts = {}
-    for table, frame in [("STATIONS", data.stations), ("ENTRANCES", data.entrances),
-                         ("TRACTS", data.tracts)]:
-        ok, _, rows, _ = write_pandas(conn, to_snowflake_frame(frame), table,
-                                      auto_create_table=True, overwrite=True,
-                                      quote_identifiers=False)
-        if not ok:
-            raise RuntimeError(f"Upload of {table} failed")
-        counts[table] = rows
+    for table, frame in bundle.tables.items():
+        stage = f"{table}_STAGE"
+        cursor.execute(create_table_sql(table))
+        result = write_pandas(conn, staging_frame(table, frame), stage, auto_create_table=True,
+                              overwrite=True, table_type="temporary")
+        if not result.success:
+            raise RuntimeError(f"Staging {table} failed")
+        cursor.execute(insert_sql(table, stage))
+        cursor.execute(f"DROP TABLE IF EXISTS {_ident(stage)}")
+        loaded = cursor.execute(f"SELECT COUNT(*) FROM {_ident(table)}").fetchone()[0]
+        if loaded != len(frame):
+            raise RuntimeError(f"{table}: loaded {loaded} rows, expected {len(frame)}")
+        counts[table] = loaded
     return counts
+
+
+def unparsed_boundaries(conn):
+    """Count tract WKT that Snowflake cannot read as GEOGRAPHY (see EXPORTS.md)."""
+    return conn.cursor().execute(
+        'SELECT COUNT(*) FROM "TRACTS_PROCESSED" WHERE TRY_TO_GEOGRAPHY("BOUNDARY_WKT") IS NULL'
+    ).fetchone()[0]
 
 
 def cortex_check(conn, model=None):
@@ -107,7 +138,8 @@ def main():
         print("Connected as user={}, role={}, warehouse={}, database={}".format(*row))
         if not args.check:
             for table, rows in upload(conn).items():
-                print(f"Uploaded {rows} rows to {table}")
+                print(f"Loaded {rows} rows into {table}")
+            print("Tract boundaries Snowflake could not parse as GEOGRAPHY:", unparsed_boundaries(conn))
         print("Cortex says:", cortex_check(conn))
 
 
