@@ -66,7 +66,7 @@ export default function Copilot({ recommendations }) {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
-  const [model, setModel] = useState('claude-sonnet-4-5');
+  const [model, setModel] = useState('llama3.3-70b');
   const log = useRef(null);
 
   useEffect(() => {
@@ -98,7 +98,7 @@ export default function Copilot({ recommendations }) {
     <section id="copilot" aria-label="Planning copilot" className="flex flex-col gap-3.5 rounded-[14px] border border-line bg-white p-5">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1.5 border-b border-divider pb-2.5">
         <h2 className="m-0 text-lg font-bold">Ask the planning copilot</h2>
-        <span className="text-xs text-muted">Snowflake Cortex Search + AI_COMPLETE ({model}) over the planning tables</span>
+        <span className="text-xs text-muted">Snowflake analytics + AI_COMPLETE ({model}) over the planning tables</span>
       </div>
       <div ref={log} role="log" aria-live="polite" className="flex max-h-[460px] flex-col gap-3 overflow-y-auto">
         {messages.length === 0 && (

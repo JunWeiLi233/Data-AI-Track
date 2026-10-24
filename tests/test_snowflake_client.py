@@ -16,17 +16,22 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'SNOWFLAKE_PASSWORD'):
             connection_settings({'SNOWFLAKE_ACCOUNT': 'a', 'SNOWFLAKE_USER': 'u'})
 
-    def test_settings_apply_team_defaults_and_overrides(self):
+    def test_settings_apply_analytics_defaults_and_overrides(self):
         settings = connection_settings({'SNOWFLAKE_ACCOUNT': 'a', 'SNOWFLAKE_USER': 'u',
                                         'SNOWFLAKE_PASSWORD': 'p', 'SNOWFLAKE_SCHEMA': 'DEV'})
-        self.assertEqual(settings['role'], 'TRANSIT_TEAM')
-        self.assertEqual(settings['warehouse'], 'TRANSIT_WH')
-        self.assertEqual(settings['database'], 'TRANSIT_GAP')
+        self.assertNotIn('role', settings)
+        self.assertNotIn('warehouse', settings)
+        self.assertEqual(settings['database'], 'NYC_TRANSIT_PLANNER')
         self.assertEqual(settings['schema'], 'DEV')
         self.assertEqual(settings['password'], 'p')
         browser = connection_settings({'SNOWFLAKE_ACCOUNT': 'a', 'SNOWFLAKE_USER': 'u',
                                        'SNOWFLAKE_AUTHENTICATOR': 'externalbrowser'})
         self.assertNotIn('password', browser)
+        configured = connection_settings({'SNOWFLAKE_ACCOUNT': 'a', 'SNOWFLAKE_USER': 'u',
+            'SNOWFLAKE_PASSWORD': 'p', 'SNOWFLAKE_ROLE': 'MY_EXISTING_ROLE',
+            'SNOWFLAKE_WAREHOUSE': 'MY_EXISTING_WH'})
+        self.assertEqual(configured['role'], 'MY_EXISTING_ROLE')
+        self.assertEqual(configured['warehouse'], 'MY_EXISTING_WH')
 
 
 class SqlTests(unittest.TestCase):
