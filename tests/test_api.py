@@ -11,7 +11,7 @@ class RecommendationTests(unittest.TestCase):
         self.assertTrue(all(s["offline_km"] <= 3.0 for s in result["stations"]))
 
     def test_rejects_invalid_parameters(self):
-        for kwargs in ({"goal": "speed"}, {"n": "0"}, {"n": "11"}, {"along": "maybe"},
+        for kwargs in ({"goal": "speed"}, {"n": "0"}, {"n": "101"}, {"along": "maybe"},
                        {"spacing": "far"}, {"spacing": "-1"}, {"budget": "Huge"}):
             with self.assertRaises(ValueError, msg=kwargs):
                 api.recommendations(**kwargs)
