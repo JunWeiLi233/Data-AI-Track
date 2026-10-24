@@ -24,29 +24,30 @@ def _redact(message):
     text = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", text, flags=re.IGNORECASE)
     text = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", text)
     text = re.sub(
-        r"(?i)\b(password|passwd|token|access_token|refresh_token|client_secret|private_key|api_key|authorization)"
-        r"\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)",
-        r"\1=[REDACTED]", text)
+        r"(?i)([\"']?)(password|passwd|token|access_token|refresh_token|client_secret|private_key|api_key|authorization)"
+        r"\1\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        r"\2=[REDACTED]", text)
     return text.replace("\r", " ").replace("\n", " ")[:2048]
 
 
-def _log_failure(phase, error, *, cursor=None, geoid=None):
+def _log_failure(phase, error, *, cursor=None, geoid=None, category=None, details=None):
     """Log a redacted message and connector codes, never raw exceptions/tracebacks."""
     state = str(getattr(error, "sqlstate", "") or "")
     message = str(getattr(error, "msg", None) or error)
     lower = message.lower()
-    if state.startswith("28") or "authentication" in lower or "incorrect username" in lower:
-        category = "authentication"
-    elif state == "42501" or any(term in lower for term in ("not authorized", "privilege", "access control")):
-        category = "permissions_or_object_access"
-    elif "warehouse" in lower:
-        category = "warehouse_configuration"
-    elif state.startswith("42"):
-        category = "sql_query"
-    elif phase == "connect":
-        category = "connection_or_authentication"
-    else:
-        category = phase
+    if category is None:
+        if state.startswith("28") or "authentication" in lower or "incorrect username" in lower:
+            category = "authentication"
+        elif state == "42501" or any(term in lower for term in ("not authorized", "privilege", "access control")):
+            category = "permissions_or_object_access"
+        elif "warehouse" in lower:
+            category = "warehouse_configuration"
+        elif state.startswith("42"):
+            category = "sql_query"
+        elif phase == "connect":
+            category = "connection_or_authentication"
+        else:
+            category = phase
     query_id = getattr(error, "sfqid", None)
     if not query_id and cursor is not None:
         candidate = getattr(cursor, "sfqid", None)
@@ -56,6 +57,7 @@ def _log_failure(phase, error, *, cursor=None, geoid=None):
                   "query_id": query_id, "message": message}
     if geoid is not None:
         diagnostic["geoid"] = geoid
+    diagnostic.update(details or {})
     safe = {key: _redact(value) if value is not None else None for key, value in diagnostic.items()}
     LOGGER.error("Snowflake diagnostic: %s", json.dumps(safe, ensure_ascii=False))
 
@@ -142,6 +144,95 @@ def _close(resource):
             pass
 
 
+CORTEX_SQL = """SELECT AI_COMPLETE(
+    model => %s,
+    prompt => %s,
+    model_parameters => {'temperature': 0, 'max_tokens': 256},
+    response_format => TYPE OBJECT(sentence_order ARRAY(VARCHAR)),
+    show_details => FALSE,
+    return_error_details => TRUE
+)"""
+
+
+class CortexResponseError(ValueError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+class CortexServiceError(RuntimeError):
+    """AI_COMPLETE completed SQL but returned its error envelope instead of a value."""
+
+
+def _cortex_category(error, *, sql_error=False):
+    message = str(getattr(error, "msg", None) or error).lower()
+    if str(getattr(error, "sqlstate", "")) == "42501" or any(
+            text in message for text in ("not authorized", "privilege", "cortex_user", "access control")):
+        return "cortex_permissions_error"
+    if re.search(r"unknown model|unsupported model|model.*(not available|unavailable|not supported|not enabled|not allowed|not found|allowlist|region)|cross.region", message):
+        return "cortex_model_unavailable"
+    return "cortex_sql_error" if sql_error else "cortex_service_error"
+
+
+def _cortex_query_id(cursor):
+    value = getattr(cursor, "sfqid", None)
+    return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", value) else None
+
+
+def _response_object(value):
+    # Snowflake/connector results can be native VARIANT objects, JSON text, or
+    # JSON string literals containing JSON text. Decode at most four layers.
+    for _ in range(4):
+        if isinstance(value, dict):
+            return value
+        if not isinstance(value, str):
+            raise CortexResponseError("expected_json_object")
+        text = value.strip()
+        # Accept only a complete JSON fence, never surrounding generated prose.
+        if text.startswith("```"):
+            match = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+            if not match:
+                raise CortexResponseError("invalid_json_fence")
+            text = match.group(1)
+        try:
+            value = json.loads(text)
+        except ValueError:
+            raise CortexResponseError("invalid_json_or_truncated_output") from None
+    if isinstance(value, dict):
+        return value
+    raise CortexResponseError("excessive_json_wrapping")
+
+
+def _cortex_order(completion):
+    if not completion or completion[0] is None:
+        raise CortexResponseError("empty_completion")
+    result = _response_object(completion[0])
+    if "error" in result or "value" in result:
+        if set(result) != {"error", "value"}:
+            raise CortexResponseError("invalid_error_envelope")
+        if result["error"] is not None:
+            # Error text is logged only through the existing credential redactor.
+            raise CortexServiceError(str(result["error"]))
+        if result["value"] is None:
+            raise CortexResponseError("empty_completion_value")
+        result = _response_object(result["value"])
+    if set(result) != {"sentence_order"}:
+        raise CortexResponseError("unexpected_response_fields")
+    candidate = result["sentence_order"]
+    if (not isinstance(candidate, list) or len(candidate) != 3
+            or not all(isinstance(item, str) for item in candidate)
+            or set(candidate) != {"distance", "population", "income"}):
+        raise CortexResponseError("invalid_sentence_order")
+    return candidate
+
+
+def _cortex_shape(completion):
+    # Content-free diagnostics only: no response excerpts, prompts, or credentials.
+    raw = completion[0] if completion else None
+    return {"response_type": type(raw).__name__,
+            "response_characters": len(raw) if isinstance(raw, str) else None}
+
+
 def get_tract_explanation(geoid):
     """Return geoid, priority_score, ai_explanation, using no local data substitute.
 
@@ -190,27 +281,42 @@ def get_tract_explanation(geoid):
             "Weights are 50% distance, 30% population, 20% income disadvantage. "
             "Never invent neighborhood names, construction costs, ridership, travel times or feasibility claims.\n"
             + json.dumps({"geoid": geoid, "metrics": facts, "verified_sentences": sentences}, allow_nan=False))
-        order, fallback = list(sentences), False
+        order = list(sentences)
+        source, reason, query_id = "fallback", None, None
+        model = os.getenv("SNOWFLAKE_CORTEX_MODEL", "llama3.3-70b").strip() or "llama3.3-70b"
         try:
-            model = os.getenv("SNOWFLAKE_CORTEX_MODEL", "llama3.3-70b").strip() or "llama3.3-70b"
-            cursor.execute("SELECT AI_COMPLETE(%s, %s, {'temperature': 0, 'max_tokens': 128})",
-                           (model, prompt), timeout=30)
+            cursor.execute(CORTEX_SQL, (model, prompt), timeout=30)
             completion = cursor.fetchone()
-            result = json.loads(completion[0])
-            candidate = result["sentence_order"]
-            if (set(result) != {"sentence_order"} or not isinstance(candidate, list) or len(candidate) != 3
-                    or not all(isinstance(item, str) for item in candidate) or set(candidate) != set(sentences)):
-                raise ValueError()
-            order = candidate
+            query_id = _cortex_query_id(cursor)
         except Exception as error:
-            _log_failure("cortex", error, cursor=cursor, geoid=geoid)
-            # Never render arbitrary model text or expose Snowflake/provider error details.
-            fallback = True
+            failed_id = getattr(error, "sfqid", None)
+            query_id = failed_id if isinstance(failed_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", failed_id) else None
+            reason = _cortex_category(error, sql_error=True)
+            _log_failure("cortex_sql", error, geoid=geoid, category=reason,
+                         details={"model": model})
+        else:
+            try:
+                order = _cortex_order(completion)
+            except CortexServiceError as error:
+                reason = _cortex_category(error)
+                _log_failure("cortex_service", error, cursor=cursor, geoid=geoid, category=reason,
+                             details={"model": model, **_cortex_shape(completion)})
+            except CortexResponseError as error:
+                reason = "cortex_response_validation"
+                _log_failure("cortex_response_validation", error, cursor=cursor, geoid=geoid,
+                             category=reason, details={"model": model, "validation_reason": error.code,
+                                                      **_cortex_shape(completion)})
+            else:
+                source = "snowflake_cortex"
+                LOGGER.info("Cortex response accepted: geoid=%s model=%s query_id=%s source=snowflake_cortex",
+                            geoid, _redact(model), _redact(query_id) if query_id else None)
         text = " ".join([lead] + [sentences[key] for key in order] + [
             "This is a geographic planning screen, not a feasibility, cost, ridership or travel-time prediction."])
-        if fallback:
+        if source == "fallback":
             text = "Data-based fallback (Cortex unavailable or response rejected). " + text
-        return {"geoid": geoid, "priority_score": score, "ai_explanation": text}
+        return {"geoid": geoid, "priority_score": score, "ai_explanation": text,
+                "explanation_source": source, "fallback_reason": reason,
+                "cortex_query_id": query_id, "cortex_model": model}
     finally:
         _close(cursor)
         _close(connection)

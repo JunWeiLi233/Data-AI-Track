@@ -17,12 +17,18 @@ class CortexExplanationTests(unittest.TestCase):
         self.connection = MagicMock()
         self.cursor = self.connection.cursor.return_value
         self.cursor.fetchmany.return_value = [ROW]
+        self.cursor.sfqid = 'cortex-query-id'
         self.cursor.fetchone.return_value = (json.dumps({'sentence_order': ['income', 'distance', 'population']}),)
 
     def test_metrics_bound_query_and_mocked_cortex_completion(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(cortex, '_connect', return_value=self.connection):
             result = cortex.get_tract_explanation(GEOID)
-        self.assertEqual(set(result), {'geoid', 'priority_score', 'ai_explanation'})
+        self.assertEqual(set(result), {'geoid', 'priority_score', 'ai_explanation',
+                                       'explanation_source', 'fallback_reason', 'cortex_query_id', 'cortex_model'})
+        self.assertEqual(result['explanation_source'], 'snowflake_cortex')
+        self.assertIsNone(result['fallback_reason'])
+        self.assertEqual(result['cortex_query_id'], 'cortex-query-id')
+        self.assertNotIn('Data-based fallback', result['ai_explanation'])
         self.assertEqual(result['priority_score'], 0.772)
         self.assertIn('6.134 km', result['ai_explanation'])
         for text in ('50%', '30%', '20%', '0.9800', '0.8400', '0.1500'):
@@ -36,13 +42,86 @@ class CortexExplanationTests(unittest.TestCase):
             self.assertIn(f'DATA:"{field}"', read.args[0])
         self.assertIn('IFF(IS_NULL_VALUE(DATA:"priority_score"), NULL, DATA:"priority_score")::FLOAT', read.args[0])
         self.assertEqual(read.args[1], (GEOID,))
-        self.assertIn('AI_COMPLETE(%s, %s', completion.args[0])
+        self.assertIn('AI_COMPLETE(', completion.args[0])
+        self.assertIn('model => %s', completion.args[0])
+        self.assertIn('response_format => TYPE OBJECT(sentence_order ARRAY(VARCHAR))', completion.args[0])
+        self.assertIn('show_details => FALSE', completion.args[0])
+        self.assertIn('return_error_details => TRUE', completion.args[0])
         self.assertEqual(completion.args[1][0], 'llama3.3-70b')
         prompt = completion.args[1][1]
         self.assertIn('6.13412', prompt)
         self.assertIn('Never invent', prompt)
         self.cursor.close.assert_called_once()
         self.connection.close.assert_called_once()
+
+    def test_double_encoded_json_matches_reported_typeerror(self):
+        value = {'sentence_order': ['income', 'distance', 'population']}
+        self.cursor.fetchone.return_value = (json.dumps(json.dumps(value)),)
+        with patch.dict(os.environ, {}, clear=True), patch.object(cortex, '_connect', return_value=self.connection):
+            result = cortex.get_tract_explanation(GEOID)
+        self.assertEqual(result['explanation_source'], 'snowflake_cortex')
+        self.assertIsNone(result['fallback_reason'])
+        self.assertNotIn('Data-based fallback', result['ai_explanation'])
+        self.assertEqual(result['cortex_query_id'], 'cortex-query-id')
+
+    def test_native_encoded_and_fenced_structured_values(self):
+        body = {'sentence_order': ['distance', 'income', 'population']}
+        for payload in (body, {'value': body, 'error': None},
+                        json.dumps({'value': body, 'error': None}),
+                        {'value': json.dumps(json.dumps(body)), 'error': None},
+                        '```json\n' + json.dumps(body) + '\n```'):
+            with self.subTest(payload_type=type(payload).__name__):
+                self.cursor.fetchone.return_value = (payload,)
+                with patch.dict(os.environ, {}, clear=True), patch.object(cortex, '_connect', return_value=self.connection):
+                    result = cortex.get_tract_explanation(GEOID)
+                self.assertEqual(result['explanation_source'], 'snowflake_cortex')
+                self.assertIsNone(result['fallback_reason'])
+
+    def test_response_validation_failures_have_safe_distinct_diagnostics(self):
+        invalid = [(None, 'empty_completion'), ('{"sentence_order":', 'invalid_json_or_truncated_output'),
+                   ({'sentence_order': ['distance', 'distance', 'income']}, 'invalid_sentence_order'),
+                   ({'sentence_order': ['distance', 'population', 'income'], 'cost': 'private-secret'}, 'unexpected_response_fields')]
+        for payload, expected_reason in invalid:
+            self.cursor.fetchone.return_value = (payload,)
+            with self.subTest(reason=expected_reason), patch.dict(os.environ, {}, clear=True), \
+                 patch.object(cortex, '_connect', return_value=self.connection), \
+                 self.assertLogs(cortex.LOGGER, level='ERROR') as captured:
+                result = cortex.get_tract_explanation(GEOID)
+            self.assertEqual(result['explanation_source'], 'fallback')
+            self.assertEqual(result['fallback_reason'], 'cortex_response_validation')
+            self.assertIn(expected_reason, '\n'.join(captured.output))
+            self.assertNotIn('private-secret', '\n'.join(captured.output))
+            self.assertNotIn('private-secret', result['ai_explanation'])
+
+    def test_sql_permissions_and_model_failures_are_distinguished(self):
+        cases = [('SQL compilation error: unexpected argument', '42000', 'cortex_sql_error'),
+                 ('Insufficient privileges for CORTEX_USER', '42501', 'cortex_permissions_error'),
+                 ('Unknown model llama3.3-70b', 'P0000', 'cortex_model_unavailable')]
+        for message, state, expected in cases:
+            error = RuntimeError(message)
+            error.sqlstate, error.sfqid = state, 'failed-cortex-query-id'
+            self.cursor.execute.side_effect = [None, error]
+            with self.subTest(expected=expected), patch.dict(os.environ, {}, clear=True), \
+                 patch.object(cortex, '_connect', return_value=self.connection), \
+                 self.assertLogs(cortex.LOGGER, level='ERROR') as captured:
+                result = cortex.get_tract_explanation(GEOID)
+            self.assertEqual(result['fallback_reason'], expected)
+            self.assertEqual(result['explanation_source'], 'fallback')
+            self.assertEqual(result['cortex_query_id'], 'failed-cortex-query-id')
+            self.assertIn('cortex_sql', '\n'.join(captured.output))
+            self.assertIn(expected, '\n'.join(captured.output))
+
+    def test_service_error_envelope_is_not_treated_as_bad_json(self):
+        self.cursor.fetchone.return_value = ({'value': None,
+            'error': 'Model llama3.3-70b is not available; "token": "not-an-env-secret"'},)
+        with patch.dict(os.environ, {}, clear=True), patch.object(cortex, '_connect', return_value=self.connection), \
+             self.assertLogs(cortex.LOGGER, level='ERROR') as captured:
+            result = cortex.get_tract_explanation(GEOID)
+        self.assertEqual(result['fallback_reason'], 'cortex_model_unavailable')
+        self.assertEqual(result['explanation_source'], 'fallback')
+        log = '\n'.join(captured.output)
+        self.assertIn('cortex_service', log)
+        self.assertNotIn('not-an-env-secret', log)
 
     def test_missing_tract_and_ambiguous_scoring_runs(self):
         for rows, status in (([], 404), ([ROW, ROW], 409)):
@@ -168,6 +247,23 @@ class ExplanationRouteTests(unittest.TestCase):
             handler.do_GET()
         call.assert_called_once_with(GEOID)
         handler._json.assert_called_once_with(200, expected)
+
+    def test_route_reports_accepted_cortex_provenance(self):
+        handler = self.handler('/api/tracts/' + GEOID + '/explanation')
+        connection = MagicMock()
+        cursor = connection.cursor.return_value
+        cursor.fetchmany.return_value = [ROW]
+        cursor.sfqid = 'cortex-query-id'
+        cursor.fetchone.return_value = (json.dumps({'value': {'sentence_order': ['income', 'distance', 'population']}, 'error': None}),)
+        with patch.dict(os.environ, {}, clear=True), patch.object(cortex, '_connect', return_value=connection):
+            handler.do_GET()
+        status, result = handler._json.call_args.args
+        self.assertEqual(status, 200)
+        self.assertEqual(result['explanation_source'], 'snowflake_cortex')
+        self.assertEqual(result['cortex_query_id'], 'cortex-query-id')
+        self.assertIsNone(result['fallback_reason'])
+        self.assertNotIn('Data-based fallback', result['ai_explanation'])
+        self.assertIn('AI_COMPLETE', cursor.execute.call_args_list[1].args[0])
 
     def test_route_service_errors_and_invalid_geoid(self):
         handler = self.handler('/api/tracts/' + GEOID + '/explanation')
