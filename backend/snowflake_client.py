@@ -16,12 +16,10 @@ from .export_pipeline import SCHEMA, _json, prepare_exports
 ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 REQUIRED = ["SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER"]
 DEFAULTS = {
-    "SNOWFLAKE_ROLE": "TRANSIT_TEAM",
-    "SNOWFLAKE_WAREHOUSE": "TRANSIT_WH",
-    "SNOWFLAKE_DATABASE": "TRANSIT_GAP",
-    "SNOWFLAKE_SCHEMA": "PUBLIC",
+    "SNOWFLAKE_DATABASE": "NYC_TRANSIT_PLANNER",
+    "SNOWFLAKE_SCHEMA": "ANALYTICS",
 }
-DEFAULT_MODEL = "mistral-large2"
+DEFAULT_MODEL = "llama3.3-70b"
 
 
 def connection_settings(env=os.environ):
@@ -35,6 +33,11 @@ def connection_settings(env=os.environ):
         **{name.removeprefix("SNOWFLAKE_").lower(): env.get(name) or value
            for name, value in DEFAULTS.items()},
     }
+    # Honor an existing role/warehouse, or the user's Snowflake defaults. Never
+    # substitute a role or warehouse from a teammate's separate account.
+    for name in ("SNOWFLAKE_ROLE", "SNOWFLAKE_WAREHOUSE"):
+        if env.get(name):
+            settings[name.removeprefix("SNOWFLAKE_").lower()] = env[name]
     # Password may be a real password or a programmatic access token.
     if env.get("SNOWFLAKE_PASSWORD"):
         settings["password"] = env["SNOWFLAKE_PASSWORD"]
@@ -45,12 +48,14 @@ def connection_settings(env=os.environ):
     return settings
 
 
-def connect():
+def connect(**overrides):
     import snowflake.connector
     from dotenv import load_dotenv
 
     load_dotenv(ENV_FILE)
-    return snowflake.connector.connect(**connection_settings())
+    settings = connection_settings()
+    settings.update(overrides)
+    return snowflake.connector.connect(**settings)
 
 
 def _ident(name):
@@ -123,7 +128,7 @@ def cortex_check(conn, model=None):
     """Ask a Cortex LLM a one-line question to prove AI access works."""
     model = model or os.environ.get("SNOWFLAKE_CORTEX_MODEL", DEFAULT_MODEL)
     cursor = conn.cursor()
-    cursor.execute("SELECT SNOWFLAKE.CORTEX.COMPLETE(%s, %s)",
+    cursor.execute("SELECT AI_COMPLETE(%s, %s)",
                    (model, "In one sentence, what is a census tract?"))
     return cursor.fetchone()[0]
 

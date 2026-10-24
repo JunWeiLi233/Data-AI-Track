@@ -4,11 +4,11 @@ Run once after `snowflake/copilot_setup.sql` (and again whenever the data or mod
 
     python -m backend.snowflake_store
 
-Connects with the `subway_app` profile in ~/.snowflake/connections.toml (key-pair
-auth for SUBWAY_APP_SVC). Override with SNOWFLAKE_CONNECTION_NAME.
+Loads authentication from the repository-root .env through snowflake_client.
+The Copilot uses SUBWAY.APP and SUBWAY_WH, independently of the export database
+settings. The login must be able to use SUBWAY_APP and SUBWAY_READER; no named
+connector profile is required.
 """
-import os
-
 import numpy as np
 import pandas as pd
 import shapely
@@ -18,7 +18,6 @@ from . import optimizer
 from .api import DESERT_KM, SQUARE_FEET_TO_KM2
 from .network import haversine_km
 
-CONNECTION_NAME = os.environ.get("SNOWFLAKE_CONNECTION_NAME", "subway_app")
 SEARCH_SERVICE = "SUBWAY.APP.PLANNING_SEARCH"
 
 METHOD_NOTES = [
@@ -45,10 +44,23 @@ METHOD_NOTES = [
 
 
 def connect(**overrides):
+    """Reuse local login settings while keeping the Copilot planning context."""
     import snowflake.connector
+    from .snowflake_client import connection_settings, ENV_FILE
+    from dotenv import load_dotenv
 
-    return snowflake.connector.connect(connection_name=CONNECTION_NAME,
-                                       enable_server_session_keep_alive_auto_detection=False, **overrides)
+    load_dotenv(ENV_FILE)
+
+    settings = connection_settings()
+    # snowflake_client defaults target TRANSIT_GAP.PUBLIC (export tables), while
+    # Copilot SQL/Search and the setup script explicitly target SUBWAY.APP.
+    settings.update(database="SUBWAY", schema="APP", warehouse="SUBWAY_WH", role="SUBWAY_APP")
+    settings.update(overrides)  # Preserve the isolated SUBWAY_READER connection.
+
+    return snowflake.connector.connect(
+        **settings,
+        enable_server_session_keep_alive_auto_detection=False,
+    )
 
 
 def _fmt(value, digits=0):

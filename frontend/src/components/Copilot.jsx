@@ -88,7 +88,7 @@ export default function Copilot({ recommendations }) {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
-  const [model, setModel] = useState('claude-sonnet-4-5');
+  const [model, setModel] = useState('llama3.3-70b');
   const log = useRef(null);
 
   useEffect(() => {
@@ -135,7 +135,7 @@ export default function Copilot({ recommendations }) {
         <span className="text-[#29B5E8]"><SnowflakeMark size={22} /></span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <h2 className="m-0 text-lg font-bold">Ask the planning copilot</h2>
-          <span className="text-xs text-muted">Snowflake Cortex Search + AI_COMPLETE ({model}) over the planning tables</span>
+          <span className="text-xs text-muted">Snowflake analytics + AI_COMPLETE ({model}) over the planning tables</span>
         </div>
       </div>
       <div ref={log} role="log" aria-live="polite" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">

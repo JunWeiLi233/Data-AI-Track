@@ -303,6 +303,87 @@ tract can differ from its group's name. Distances are straight lines, and the
 model knows nothing about buses, travel time or cost.
 
 
+## Gold labels and supervised check (`backend/gold_labels.py`, `backend/supervised.py`)
+
+To check the score and the groups against something real, the gold labels use
+an outcome none of the methods see: how long residents take to get to work.
+A tract is labeled underserved when its share of workers commuting 60+ minutes
+(ACS 2024 5-year table B08303) is in the top quarter of NYC tracts. The share of
+car-free households (B25044) is kept as a second, descriptive column. Tracts
+with fewer than 100 workers get no label, and nothing is filled in.
+
+The source CSVs `data/raw/commute_time.csv` and `data/raw/vehicles.csv` are the
+NYC tract rows of the Census Bureau's public summary files (no API key needed).
+The gold table is written to `data/gold/gold_labels.csv`.
+
+```sh
+python -m backend.gold_labels --download   # refresh the two source CSVs
+python -m backend.gold_labels               # rebuild data/gold/gold_labels.csv
+python -m backend.supervised                # compare every method to the labels
+```
+
+ACS tract estimates are noisy. For about half the labeled tracts the 60+ minute
+share is within its 90% margin of error of the cutoff, so another survey sample
+could flip the label. `label_confident` marks the rest, and results are also
+scored on those tracts alone. This noise caps how well any method can score.
+
+### Travel time (`backend/travel_time.py`)
+
+`transit_minutes_to_jobs` estimates a subway trip from each tract to Midtown or
+Lower Manhattan, whichever is quicker. It walks to the best of the three
+nearest stations, then rides the network: the reconstructed lines plus one
+spanning tree per train route, so trains cross named-line junctions and express
+routes skip local stops. It assumes 27 km/h on trains and 4.8 km/h walking with
+a 1.3 street detour, a 5-minute penalty for walking between platforms, and the
+ferry for Staten Island. Waits, frequency and buses are not modeled, so these
+are rough planning estimates (149 St–Grand Concourse about 20 min, Tottenville
+about 82 min).
+
+### Where residents work (`backend/job_destinations.py`)
+
+Travel time to Manhattan assumes everyone works there; only 44% of NYC
+residents' jobs are in Manhattan. LEHD LODES 2023 origin-destination data gives, for each home
+tract, how many residents work in each other tract (from unemployment-insurance
+records, not the ACS commute questions behind the labels).
+`data/raw/lodes_flows.csv.gz` (3.4 MB) holds 1.05M home→work tract pairs and
+3.7M jobs; work outside NYC keeps only its state (New York State, New Jersey,
+Connecticut). Combined with `tract_minutes_matrix`, the subway minutes between
+every pair of tracts, it yields five features per tract: jobs-weighted mean
+minutes, shares of jobs over 45 and over 60 minutes away, and shares in
+Manhattan and outside NYC. Refresh with
+`python -m backend.job_destinations --download`.
+
+### Results
+
+`backend.supervised` trains logistic regression and gradient boosting on four
+nested feature sets: the clustering features; plus travel time; plus where
+residents work; plus borough and coordinates. An ensemble averages the two
+models' ranks. Hyperparameters are tuned inside each training fold, and folds
+are grouped by community district (`CDTA2020`), so a model is never tested on
+the neighbours it trained on. With the current data:
+
+| Method | ROC AUC | ROC AUC, confident labels | Underserved in top quarter |
+|---|---:|---:|---:|
+| Logistic regression, plus location | 0.77 | 0.89 | 46% |
+| Logistic regression, plus job destinations | 0.75 | 0.87 | 45% |
+| Share of jobs 45+ minutes away, alone | 0.72 | 0.84 | 36% |
+| Gradient boosting, plus travel time | 0.71 | 0.82 | 39% |
+| Travel time to Manhattan, alone | 0.70 | 0.81 | 35% |
+| Logistic regression, clustering features only | 0.61 | 0.70 | 30% |
+| Distance only | 0.61 | 0.70 | 35% |
+| k-means groups | 0.56 | 0.61 | 25% |
+| Priority score | 0.55 | 0.60 | 29% |
+
+Random ranking scores 0.5 and 25%. What predicts long commutes is how far
+residents' jobs are by subway: first the trip to Manhattan, then the trip to
+where they actually work. Borough and coordinates add a little more but make
+the model harder to explain. Feeder buses, more job centers, weighting
+confident labels and ensembling each changed ROC AUC by 0.01 or less. The
+priority score and the k-means groups agree least with the gold labels.
+Group 0 (near the subway, higher income) is rarely underserved (10%), but
+groups 1–3 are all about 30%.
+
+
 ## Subway expansion simulator
 
 `backend.simulator` supports city planners comparing **station additions** to the
@@ -425,78 +506,119 @@ benefits and must be labeled as proxies in the dashboard. Results support
 screening and comparison for government planning; they do not establish causal
 benefits or replace engineering review, equity analysis and community input.
 
-## Snowflake
+## Snowflake table-based planning Copilot
 
-I set up one shared Snowflake account for the team. Everyone uses the
-`TRANSIT_TEAM` role and the `TRANSIT_WH` warehouse, and the tables live in
-`TRANSIT_GAP.PUBLIC`. They are the four validated tables from
-`export_pipeline.prepare_exports()`, which are `TRACTS_PROCESSED`,
-`STATION_LOCATIONS`, `BASELINE_TRACT_SCORES` and `SCORING_RUNS` (see
-`EXPORTS.md`). Entrances are not loaded, for the same reasons they are not exported.
+The existing `POST /api/chat` endpoint and React conversation/recommendation
+context now use the four existing tables in `NYC_TRANSIT_PLANNER.ANALYTICS`.
+No `SUBWAY` database, special app/reader roles, named connection, Cortex Search
+service, embedding index, profile load, or resource creation is required.
+`backend/snowflake_store.py` and `snowflake/copilot_setup.sql` remain legacy
+provisioning tools; the Copilot no longer imports or invokes them.
 
-The account owner runs `snowflake/setup.sql` once in a Snowsight worksheet as
-ACCOUNTADMIN. The bottom of that file has a template for adding each teammate.
+### Local setup
 
-Each teammate then copies `.env.example` to `.env` and fills in their own login.
-The `.env` file stays on your machine and git ignores it, so please never commit
-a password.
+1. If the repository-root `.env` does not exist, copy `.env.example` there.
+2. Fill `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, and `SNOWFLAKE_PASSWORD` with your
+   existing account login. For interactive MFA, leave the password empty and set
+   `SNOWFLAKE_AUTHENTICATOR=externalbrowser` instead. Keep secrets server-side;
+   `.env` is git-ignored. No environment file is created by the Copilot itself.
+3. Set `SNOWFLAKE_DATABASE=NYC_TRANSIT_PLANNER`, `SNOWFLAKE_SCHEMA=ANALYTICS`,
+   `SNOWFLAKE_CORTEX_MODEL=llama3.3-70b`, plus your existing
+   `SNOWFLAKE_ROLE` and `SNOWFLAKE_WAREHOUSE`. Blank role/warehouse settings use
+   the user's Snowflake defaults; no teammate-specific names are substituted.
+4. If SCORING_RUNS has multiple rows, set `SNOWFLAKE_SCORING_RUN_ID` to one
+   existing run. Joins preserve dataset_id and GEOID; no arbitrary "latest" run
+   is selected and no baseline is recomputed.
+5. Start `.venv/bin/python -m backend.server --port 8000` from the repository
+   root. The running React/Vite app continues proxying `/api/chat` to that server.
+   Restart the backend after changing environment variables. Existing process
+   variables override the root `.env`; stale/empty overrides should be unset.
+
+The shared connection helper is `backend.snowflake_client.connect()`, which loads
+`.env` relative to the repository, not the process working directory. Authentication
+supports the existing password or authenticator settings; the legacy helper does
+not interpret `SNOWFLAKE_TOKEN` as OAuth automatically. Use the documented login
+path rather than silently mixing token mechanisms. The existing tract-explanation
+endpoint and its separate connection/decoding implementation are unchanged.
+
+The configured role needs warehouse/database/schema USAGE, SELECT on the four
+existing tables, and access to AI_COMPLETE and the requested model. No DDL,
+write privilege, ACCOUNTADMIN role or Search-service permission is needed by
+this Copilot. If access fails, ask the account owner to verify the existing role's
+grants and model/region access. The Copilot does not create or grant anything.
+
+### How evidence is retrieved
+
+Each request opens one bounded connection and closes its cursor/connection when
+finished. Before generating evidence SQL, the backend runs read-only DESCRIBE
+TABLE against all four actual tables. For a DATA VARIANT/OBJECT column it inspects
+OBJECT_KEYS from an actual object row. It resolves logical fields to the observed
+flat column names or case-sensitive JSON keys, preserves JSON nulls as SQL NULL,
+and refuses absent/ambiguous fields. It does not assume every uploaded table has
+the same layout. An empty VARIANT table cannot reveal its object fields and is
+reported as missing schema/data, never populated with guessed fields.
+
+AI_COMPLETE chooses only a validated intent and bounded filters:
+
+- highest-priority residential tracts, optionally by borough;
+- one tract's details by 11-digit string GEOID;
+- borough accessibility summaries, including population in tracts whose reference
+  points are >1.2 km from a station;
+- a bounded sample of station coordinate locations (no invented borough/line assignment);
+- saved scoring methodology and weights;
+- explanations of the recommendations currently supplied by the frontend.
+
+Only backend-authored SELECT templates execute. The model cannot supply SQL,
+identifiers, expressions, joins, ordering, or arbitrary filters. Boroughs and
+GEOIDs are validated, values use bound parameters, and row limits are 1–50.
+Queries use only the configured scoring run's dataset. Data SELECTs have a
+20-second timeout; model calls have 30 seconds. There are no session-role changes
+or persistent views/tables. The previous regex-based free-SQL guard is removed
+from the Copilot path rather than being relied on with your own account role.
+
+The second Cortex call writes a conversational response from retrieved rows,
+saved run metadata, history and the explicitly labeled client-supplied current
+recommendations. It must preserve missing/top-coded income and neutral-score
+flags and treat straight-line distances as geographic proxies. Unsupported
+cost/feasibility/ridership/history/route questions return an explicit limitation.
+No-match results and absent recommendation context are reported honestly.
+A failed answer call returns a labeled fallback message and the actual retrieved
+rows; failed queries do not produce invented rows. `answer_source` identifies
+`cortex`, `fallback`, `unsupported`, or `missing_data`.
+
+The response keeps the frontend contract: `answer`, `model`, `sources`, `sql`,
+`sql_error`, `columns`, `rows` (at most ten for display). The SQL field shows the
+backend template with placeholders, not interpolated secret values. Sources name
+the actual tables read or the client recommendation context. The map, station
+recommendation algorithm, scoring/simulation, conversation state and tract Cortex
+explanation route are unchanged. Only the chat's stale Search/model caption is
+updated in the frontend.
+
+### Test without uploading or provisioning
 
 ```sh
-python -m backend.snowflake_client --check   # test the login and Cortex
-python -m backend.snowflake_client           # load the four tables, then test Cortex
+curl --fail --silent --show-error http://127.0.0.1:8000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Which five residential tracts in Queens have the highest investment priority?","history":[]}'
+
+curl --fail --silent --show-error http://127.0.0.1:8000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"How many residents live in transit-desert tracts in each borough?","history":[]}'
+
+SNOWFLAKE_LIVE_TESTS= .venv/bin/python -m unittest discover -s tests -v
+# Optional, only after configuring credentials and existing permissions:
+SNOWFLAKE_LIVE_TESTS=1 .venv/bin/python -m unittest discover -s tests -p test_copilot.py -v
 ```
 
-Loading replaces the tables each time, so it is safe to run again after the data
-or scoring changes. Each table is created with the Snowflake types and NOT NULL
-rules declared in `export_pipeline.SCHEMA`, so column names are the same as the
-export in upper case. Rows go through a temporary staging table first. Lists and
-nested values such as `ALIASES` and `WEIGHTS` are parsed into VARIANT, and
-missing values like the 126 unavailable incomes arrive as SQL NULL rather than
-zero. After each table loads, the script compares the Snowflake row count with
-the export and stops if they differ.
+Expect nonempty actual `rows`, table `sources`, `sql_error=null`, and
+`answer_source="cortex"` on a successful analytical question. A methodology
+question returns saved SCORING_RUNS evidence. Logins/data schemas/model access
+are not proven by mocked tests. Server diagnostics reuse the existing credential
+redactor and never print connection settings, prompts, raw rows or secrets.
 
-Tract boundaries stay as WKT text in `BOUNDARY_WKT`. The script prints how many
-of them Snowflake cannot read with `TRY_TO_GEOGRAPHY`, which is the check
-`EXPORTS.md` asks for before anyone converts them.
-
-If Cortex says the model is not available, set `SNOWFLAKE_CORTEX_MODEL` in `.env`
-to another model or turn on cross-region inference near the end of `setup.sql`.
-
-## Snowflake planning copilot
-
-The Copilot panel answers planners' questions with Snowflake Cortex, grounded in
-the same data and models the app serves.
-
-**One-time setup** (Snowflake account with `AI_COMPLETE`; new accounts cannot use
-the legacy `SNOWFLAKE.CORTEX.COMPLETE`):
-
-1. Generate a key pair for the service user (the private key stays local):
-   `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ~/.snowflake/keys/subway_app_rsa_key.p8`
-2. Run `snowflake/copilot_setup.sql` as ACCOUNTADMIN with the public key filled in. It
-   creates `SUBWAY_WH`, `SUBWAY.APP`, the `SUBWAY_APP` role (loads tables, owns
-   the search service), the read-only `SUBWAY_READER` role (with
-   `SNOWFLAKE.CORTEX_USER`) and the key-pair service user `SUBWAY_APP_SVC`.
-3. Add a `[subway_app]` profile to `~/.snowflake/connections.toml` (account,
-   `user = "SUBWAY_APP_SVC"`, `authenticator = "SNOWFLAKE_JWT"`,
-   `private_key_file`, role, warehouse, database `SUBWAY`, schema `APP`), or
-   point `SNOWFLAKE_CONNECTION_NAME` at another profile.
-4. `python -m backend.snowflake_store` loads `TRACTS` (with a `GEOGRAPHY`
-   column), `STATIONS` (point `LOCATION`), `LINES`, the `NEIGHBORHOODS` view and
-   about 3,100 text `PROFILES` (neighborhoods, tracts, stations, lines, method
-   notes), and creates the Cortex Search service `SUBWAY.APP.PLANNING_SEARCH`.
-   Rerun it whenever the data or models change.
-
-**Per question** (`POST /api/chat`, `backend/copilot.py`):
-
-1. Cortex Search retrieves the six most relevant profiles.
-2. `AI_COMPLETE` (`claude-sonnet-4-5`) drafts at most one SELECT over the
-   planning tables, or declines. A guard allows a single SELECT/WITH without
-   DML, DDL or session commands, and it runs as `SUBWAY_READER` with secondary
-   roles off, a 20-second timeout and 50 rows.
-3. `AI_COMPLETE` answers from the profiles, the query result and the
-   recommendations currently shown in the app (sent with self-describing field
-   names), and the response lists its sources and SQL.
-
-Answers take about 10 to 15 seconds (two model calls). Unit tests cover the SQL
-guard and parsing; `SNOWFLAKE_LIVE_TESTS=1 python -m unittest tests.test_copilot`
-also calls Snowflake.
+Do not run `python -m backend.snowflake_store` to fix this Copilot; that legacy
+command creates/replaces objects in a different deployment. Likewise, running
+`python -m backend.snowflake_client` **without `--check` replaces uploaded tables**
+and is unnecessary for chat. The helper's optional `--check` uses AI_COMPLETE;
+it is not a data upload, but its CLI displays connection context, so use it only
+in your own terminal rather than sharing its output as credentials.
