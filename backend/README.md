@@ -417,3 +417,40 @@ points and whole-tract population counts can overstate or understate resident
 benefits and must be labeled as proxies in the dashboard. Results support
 screening and comparison for government planning; they do not establish causal
 benefits or replace engineering review, equity analysis and community input.
+
+## Snowflake
+
+I set up one shared Snowflake account for the team. Everyone uses the
+`TRANSIT_TEAM` role and the `TRANSIT_WH` warehouse, and the tables live in
+`TRANSIT_GAP.PUBLIC`. They are the four validated tables from
+`export_pipeline.prepare_exports()`, which are `TRACTS_PROCESSED`,
+`STATION_LOCATIONS`, `BASELINE_TRACT_SCORES` and `SCORING_RUNS` (see
+`EXPORTS.md`). Entrances are not loaded, for the same reasons they are not exported.
+
+The account owner runs `snowflake/setup.sql` once in a Snowsight worksheet as
+ACCOUNTADMIN. The bottom of that file has a template for adding each teammate.
+
+Each teammate then copies `.env.example` to `.env` and fills in their own login.
+The `.env` file stays on your machine and git ignores it, so please never commit
+a password.
+
+```sh
+python -m backend.snowflake_client --check   # test the login and Cortex
+python -m backend.snowflake_client           # load the four tables, then test Cortex
+```
+
+Loading replaces the tables each time, so it is safe to run again after the data
+or scoring changes. Each table is created with the Snowflake types and NOT NULL
+rules declared in `export_pipeline.SCHEMA`, so column names are the same as the
+export in upper case. Rows go through a temporary staging table first. Lists and
+nested values such as `ALIASES` and `WEIGHTS` are parsed into VARIANT, and
+missing values like the 126 unavailable incomes arrive as SQL NULL rather than
+zero. After each table loads, the script compares the Snowflake row count with
+the export and stops if they differ.
+
+Tract boundaries stay as WKT text in `BOUNDARY_WKT`. The script prints how many
+of them Snowflake cannot read with `TRY_TO_GEOGRAPHY`, which is the check
+`EXPORTS.md` asks for before anyone converts them.
+
+If Cortex says the model is not available, set `SNOWFLAKE_CORTEX_MODEL` in `.env`
+to another model or turn on cross-region inference near the end of `setup.sql`.
