@@ -21,7 +21,7 @@ DEFAULTS = {
     "SNOWFLAKE_DATABASE": "TRANSIT_GAP",
     "SNOWFLAKE_SCHEMA": "PUBLIC",
 }
-DEFAULT_MODEL = "mistral-large2"
+DEFAULT_MODEL = "claude-sonnet-4-5"
 
 
 def connection_settings(env=os.environ):
@@ -120,10 +120,13 @@ def unparsed_boundaries(conn):
 
 
 def cortex_check(conn, model=None):
-    """Ask a Cortex LLM a one-line question to prove AI access works."""
+    """Ask a Cortex LLM a one-line question to prove AI access works.
+
+    New accounts cannot call the legacy SNOWFLAKE.CORTEX.COMPLETE, so this uses AI_COMPLETE.
+    """
     model = model or os.environ.get("SNOWFLAKE_CORTEX_MODEL", DEFAULT_MODEL)
     cursor = conn.cursor()
-    cursor.execute("SELECT SNOWFLAKE.CORTEX.COMPLETE(%s, %s)",
+    cursor.execute("SELECT AI_COMPLETE(%s, %s)",
                    (model, "In one sentence, what is a census tract?"))
     return cursor.fetchone()[0]
 
