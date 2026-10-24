@@ -19,11 +19,18 @@ tracts = data.tracts
 
 ## Frontend
 
+The UI is a React + Tailwind CSS app built with Vite (Node 20+):
+
 ```sh
+cd frontend && npm install && npm run build && cd ..
 python -m backend.server  # then open http://127.0.0.1:8000
 ```
 
-`backend/server.py` (standard library only) serves `frontend/` and JSON
+For live reload, keep the server running and use `cd frontend && npm run dev`
+(http://localhost:5173, which proxies `/api` to port 8000). Components live in
+`frontend/src/components`; theme colors are Tailwind tokens in `src/index.css`.
+
+`backend/server.py` (standard library only) serves `frontend/dist` and JSON
 endpoints built in `backend/api.py`; data is loaded once per process:
 
 - `/api/summary`: headline counts from `load_data`.
@@ -36,8 +43,8 @@ endpoints built in `backend/api.py`; data is loaded once per process:
 - `/api/recommendations?goal=access|eff&n=1..10&along=1|0&spacing=km&budget=Low|Medium|High`:
   `backend/optimizer.py` output (below).
 
-The map is Leaflet 1.9.4 (from cdnjs) on OpenStreetMap tiles. OSM's volunteer
-tile servers suit development only; switch `TILE_URL` in `frontend/app.js` to a
+The map is Leaflet 1.9.4 (npm) on OpenStreetMap tiles. OSM's volunteer
+tile servers suit development only; switch `TILE_URL` in `frontend/src/components/MapPanel.jsx` to a
 tile provider or self-hosted tiles before heavy use.
 
 ### Existing line network (`backend/network.py`)
@@ -247,6 +254,55 @@ equity evidence and community input. The project pitch's AI capabilities should
 be distinguished from this transparent rule-based scoring module.
 
 
+## Neighborhood types (`backend/clustering.py`)
+
+I added a machine learning model that sorts tracts into neighborhood types. We
+have no labels that say which tracts are underserved, so I did not train a model
+to predict that. It would only learn to copy the scoring formula above. Instead I
+used k-means clustering, which groups tracts that look alike without needing any
+labels.
+
+Each tract is described by three numbers. They are the distance to the nearest
+station from `score_tracts`, residents per km² with area measured in EPSG:2263
+like the frontend, and median household income. I take the log of each, since
+all three are skewed, and then standardize them so no single number dominates.
+
+```python
+from backend.clustering import cluster_tracts, cluster_summary
+
+clustered = cluster_tracts()             # 4 groups by default
+clustered = cluster_tracts(scored, 6)    # reuse an existing score_tracts result
+print(cluster_summary(clustered))        # one row per group
+```
+
+```sh
+python -m backend.clustering --clusters 4
+```
+
+The server also returns the groups at `/api/clusters`. The `tracts` field maps
+each GEOID to its group number so the map can join it with `/api/tracts`.
+
+Group 0 is always the one closest to the subway, and each group gets a plain name
+such as "Dense, lower income". The 126 tracts with no residents, no income
+estimate or bad geometry get no group, and nothing is filled in for them. The
+result does not change if the input rows are shuffled.
+
+With the current data the four groups look like this.
+
+| Group | Name | Tracts | Residents | Median distance | Mean priority |
+|---:|---|---:|---:|---:|---:|
+| 0 | Near the subway, dense, higher income | 603 | 2.68M | 0.31 km | 0.18 |
+| 1 | Dense, lower income | 662 | 2.94M | 0.37 km | 0.25 |
+| 2 | Spread out | 621 | 1.80M | 0.83 km | 0.19 |
+| 3 | Very far from the subway, spread out | 313 | 1.02M | 3.34 km | 0.41 |
+
+The silhouette score is about 0.31, which means the groups are real but they
+overlap. Three to six groups all score about the same, so four is a readability
+choice and not a discovery. The names describe the group as a whole, and a single
+tract can differ from its group's name. Distances are straight lines, and the
+model knows nothing about buses, travel time or cost.
+
+
 ## Subway expansion simulator
 
 `backend.simulator` supports city planners comparing **station additions** to the
@@ -368,3 +424,79 @@ points and whole-tract population counts can overstate or understate resident
 benefits and must be labeled as proxies in the dashboard. Results support
 screening and comparison for government planning; they do not establish causal
 benefits or replace engineering review, equity analysis and community input.
+
+## Snowflake
+
+I set up one shared Snowflake account for the team. Everyone uses the
+`TRANSIT_TEAM` role and the `TRANSIT_WH` warehouse, and the tables live in
+`TRANSIT_GAP.PUBLIC`. They are the four validated tables from
+`export_pipeline.prepare_exports()`, which are `TRACTS_PROCESSED`,
+`STATION_LOCATIONS`, `BASELINE_TRACT_SCORES` and `SCORING_RUNS` (see
+`EXPORTS.md`). Entrances are not loaded, for the same reasons they are not exported.
+
+The account owner runs `snowflake/setup.sql` once in a Snowsight worksheet as
+ACCOUNTADMIN. The bottom of that file has a template for adding each teammate.
+
+Each teammate then copies `.env.example` to `.env` and fills in their own login.
+The `.env` file stays on your machine and git ignores it, so please never commit
+a password.
+
+```sh
+python -m backend.snowflake_client --check   # test the login and Cortex
+python -m backend.snowflake_client           # load the four tables, then test Cortex
+```
+
+Loading replaces the tables each time, so it is safe to run again after the data
+or scoring changes. Each table is created with the Snowflake types and NOT NULL
+rules declared in `export_pipeline.SCHEMA`, so column names are the same as the
+export in upper case. Rows go through a temporary staging table first. Lists and
+nested values such as `ALIASES` and `WEIGHTS` are parsed into VARIANT, and
+missing values like the 126 unavailable incomes arrive as SQL NULL rather than
+zero. After each table loads, the script compares the Snowflake row count with
+the export and stops if they differ.
+
+Tract boundaries stay as WKT text in `BOUNDARY_WKT`. The script prints how many
+of them Snowflake cannot read with `TRY_TO_GEOGRAPHY`, which is the check
+`EXPORTS.md` asks for before anyone converts them.
+
+If Cortex says the model is not available, set `SNOWFLAKE_CORTEX_MODEL` in `.env`
+to another model or turn on cross-region inference near the end of `setup.sql`.
+
+## Snowflake planning copilot
+
+The Copilot panel answers planners' questions with Snowflake Cortex, grounded in
+the same data and models the app serves.
+
+**One-time setup** (Snowflake account with `AI_COMPLETE`; new accounts cannot use
+the legacy `SNOWFLAKE.CORTEX.COMPLETE`):
+
+1. Generate a key pair for the service user (the private key stays local):
+   `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ~/.snowflake/keys/subway_app_rsa_key.p8`
+2. Run `snowflake/copilot_setup.sql` as ACCOUNTADMIN with the public key filled in. It
+   creates `SUBWAY_WH`, `SUBWAY.APP`, the `SUBWAY_APP` role (loads tables, owns
+   the search service), the read-only `SUBWAY_READER` role (with
+   `SNOWFLAKE.CORTEX_USER`) and the key-pair service user `SUBWAY_APP_SVC`.
+3. Add a `[subway_app]` profile to `~/.snowflake/connections.toml` (account,
+   `user = "SUBWAY_APP_SVC"`, `authenticator = "SNOWFLAKE_JWT"`,
+   `private_key_file`, role, warehouse, database `SUBWAY`, schema `APP`), or
+   point `SNOWFLAKE_CONNECTION_NAME` at another profile.
+4. `python -m backend.snowflake_store` loads `TRACTS` (with a `GEOGRAPHY`
+   column), `STATIONS` (point `LOCATION`), `LINES`, the `NEIGHBORHOODS` view and
+   about 3,100 text `PROFILES` (neighborhoods, tracts, stations, lines, method
+   notes), and creates the Cortex Search service `SUBWAY.APP.PLANNING_SEARCH`.
+   Rerun it whenever the data or models change.
+
+**Per question** (`POST /api/chat`, `backend/copilot.py`):
+
+1. Cortex Search retrieves the six most relevant profiles.
+2. `AI_COMPLETE` (`claude-sonnet-4-5`) drafts at most one SELECT over the
+   planning tables, or declines. A guard allows a single SELECT/WITH without
+   DML, DDL or session commands, and it runs as `SUBWAY_READER` with secondary
+   roles off, a 20-second timeout and 50 rows.
+3. `AI_COMPLETE` answers from the profiles, the query result and the
+   recommendations currently shown in the app (sent with self-describing field
+   names), and the response lists its sources and SQL.
+
+Answers take about 10 to 15 seconds (two model calls). Unit tests cover the SQL
+guard and parsing; `SNOWFLAKE_LIVE_TESTS=1 python -m unittest tests.test_copilot`
+also calls Snowflake.
