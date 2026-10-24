@@ -4,12 +4,13 @@ Run from the repository root: python -m backend.server [--port 8000]
 """
 import argparse
 import json
+import re
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import api
+from . import api, cortex_explanations
 
 FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
 
@@ -21,7 +22,15 @@ class Handler(SimpleHTTPRequestHandler):
             return super().do_GET()
         query = {k: v[-1] for k, v in parse_qs(url.query).items()}
         try:
-            if url.path == "/api/recommendations":
+            explanation_route = re.fullmatch(r"/api/tracts/([^/]+)/explanation", url.path)
+            if explanation_route:
+                geoid = explanation_route.group(1)
+                try:
+                    body = cortex_explanations.get_tract_explanation(geoid)
+                except cortex_explanations.ExplanationError as error:
+                    return self._json(error.status, {"geoid": geoid, "priority_score": None,
+                                                     "ai_explanation": None, "error": str(error)})
+            elif url.path == "/api/recommendations":
                 body = api.recommendations(**{k: query[k] for k in ("goal", "n", "along", "spacing", "budget")
                                               if k in query})
             elif url.path == "/api/summary":
