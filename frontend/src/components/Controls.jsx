@@ -7,6 +7,7 @@ const GOAL_TEXT = {
 
 const LAYERS = [
   ['density', 'Population density'],
+  ['risk', 'Underserved risk (model)'],
   ['lines', 'Existing subway lines'],
   ['stations', 'Recommended stations'],
   ['walk', '10-minute walk area'],

@@ -40,7 +40,9 @@ from sklearn.preprocessing import StandardScaler
 from .clustering import cluster_tracts
 from .data_loader import load_data
 from .gold_labels import build_gold_labels
-from .job_destinations import FEATURES as JOB_DESTINATION_FEATURES, job_destination_features
+from .bus_network import bus_access_features
+from .job_destinations import ANY_MODE_FEATURES, FEATURES as JOB_DESTINATION_FEATURES
+from .job_destinations import any_mode_job_features, job_destination_features
 from .scoring import score_tracts
 from .travel_time import transit_minutes_to_jobs
 
@@ -50,10 +52,14 @@ CLUSTERING_FEATURES = {"nearest_station_distance_km": "log1p", "population_densi
 TRAVEL_FEATURES = {**CLUSTERING_FEATURES, "transit_minutes_to_jobs": "log"}
 JOB_FEATURES = {**TRAVEL_FEATURES, "job_minutes_mean": "log", "job_share_over_45": "raw",
                 "job_share_over_60": "raw", "job_share_manhattan": "raw", "job_share_outside_nyc": "raw"}
+BUS_FEATURES = {**JOB_FEATURES, "any_mode_job_minutes_mean": "log", "any_mode_job_share_over_45": "raw",
+                "any_mode_job_share_over_60": "raw", "bus_trips_per_hour_400m": "log1p", "bus_routes_400m": "log1p"}
 FEATURE_SETS = {
     "clustering_features": CLUSTERING_FEATURES,
     "plus_travel_time": TRAVEL_FEATURES,
     "plus_job_destinations": JOB_FEATURES,
+    # Bus as well as subway trips to jobs, and how much bus service is nearby.
+    "plus_bus": BUS_FEATURES,
     # Where the tract is: lets a model learn patterns the network misses
     # (express buses, ferries, car commuting), at some cost to explanation.
     "plus_location": {**JOB_FEATURES, "BoroName": "onehot", "latitude": "raw", "longitude": "raw"},
@@ -84,20 +90,29 @@ def feature_matrix(frame, feature_set=DEFAULT_FEATURE_SET):
     return np.column_stack(columns)
 
 
-def training_frame(data=None, gold=None, flows=None):
-    """Clustered tracts with travel and job features, joined to gold labels.
-
-    Keeps only rows usable by every method.
-    """
+def feature_frame(data=None, gold=None, flows=None):
+    """Every tract with clustering, travel and job features, left-joined to gold labels."""
     data = load_data() if data is None else data
     gold = build_gold_labels() if gold is None else gold
     clustered = cluster_tracts(score_tracts(data))
     clustered["transit_minutes_to_jobs"] = transit_minutes_to_jobs(clustered, data)
     clustered = clustered.join(job_destination_features(clustered, data, flows))
-    frame = clustered.merge(gold, on="GEOID", how="left", validate="one_to_one")
-    usable = (frame.cluster.notna() & frame.underserved.notna() & frame.priority_score.notna()
-              & frame.CDTA2020.notna() & frame.transit_minutes_to_jobs.gt(0)
-              & frame.job_minutes_mean.gt(0) & frame[list(JOB_DESTINATION_FEATURES)].notna().all(axis=1))
+    clustered = clustered.join(any_mode_job_features(clustered, data, flows)).join(bus_access_features(clustered))
+    return clustered.merge(gold, on="GEOID", how="left", validate="one_to_one")
+
+
+def has_features(frame):
+    """Rows with every feature any method uses, labeled or not."""
+    return (frame.cluster.notna() & frame.priority_score.notna() & frame.CDTA2020.notna()
+            & frame.transit_minutes_to_jobs.gt(0) & frame.job_minutes_mean.gt(0)
+            & frame[list(JOB_DESTINATION_FEATURES) + list(ANY_MODE_FEATURES)].notna().all(axis=1)
+            & frame.any_mode_job_minutes_mean.gt(0))
+
+
+def training_frame(data=None, gold=None, flows=None, frame=None):
+    """feature_frame rows with a gold label and every feature; pass frame to reuse one."""
+    frame = feature_frame(data, gold, flows) if frame is None else frame
+    usable = has_features(frame) & frame.underserved.notna()
     return frame[usable].sort_values("GEOID").reset_index(drop=True)
 
 
@@ -105,6 +120,18 @@ def _precision_at_top(y, score, share=TOP_SHARE):
     top = max(1, int(round(len(y) * share)))
     order = np.argsort(-score, kind="stable")[:top]
     return float(y[order].mean())
+
+
+def grouped_folds(frame, n_splits=DEFAULT_SPLITS):
+    """(train, test) position arrays; no community district is on both sides."""
+    y = frame.underserved.astype("int64").to_numpy()
+    return list(GroupKFold(n_splits=n_splits).split(frame, y, frame.CDTA2020.to_numpy()))
+
+
+def fit_model(name, x, y, groups):
+    """Fit MODELS[name], tuning it with folds grouped like the outer ones."""
+    inner = list(GroupKFold(n_splits=INNER_SPLITS).split(x, y, groups))
+    return clone(MODELS[name]).set_params(cv=inner).fit(x, y)
 
 
 def out_of_fold_scores(frame, n_splits=DEFAULT_SPLITS, feature_sets=tuple(FEATURE_SETS)):
@@ -121,13 +148,12 @@ def out_of_fold_scores(frame, n_splits=DEFAULT_SPLITS, feature_sets=tuple(FEATUR
     for feature_set in feature_sets:
         for model in MODELS:
             scores[f"{model}:{feature_set}"] = np.full(len(frame), np.nan)
-    for train, test in GroupKFold(n_splits=n_splits).split(frame, y, groups):
+    for train, test in grouped_folds(frame, n_splits):
         rates = pd.Series(y[train]).groupby(cluster[train]).mean()
         scores["cluster"][test] = pd.Series(cluster[test]).map(rates).fillna(y[train].mean()).to_numpy()
-        inner = list(GroupKFold(n_splits=INNER_SPLITS).split(train, y[train], groups[train]))
         for feature_set, x in matrices.items():
-            for name, model in MODELS.items():
-                fitted = clone(model).set_params(cv=inner).fit(x[train], y[train])
+            for name in MODELS:
+                fitted = fit_model(name, x[train], y[train], groups[train])
                 scores[f"{name}:{feature_set}"][test] = fitted.predict_proba(x[test])[:, 1]
     for feature_set in feature_sets:
         # Ranks are pooled over all folds; fine for AUC, which only compares ranks.

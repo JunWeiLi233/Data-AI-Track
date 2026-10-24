@@ -47,6 +47,8 @@ class Handler(SimpleHTTPRequestHandler):
                 body = api.transit_deserts()
             elif url.path == "/api/clusters":
                 body = api.tract_clusters()
+            elif url.path == "/api/planning-model":
+                body = api.planning_predictions()
             else:
                 return self._json(404, {"error": "not found"})
         except ValueError as error:

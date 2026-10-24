@@ -40,5 +40,32 @@ class MapLayerTests(unittest.TestCase):
             self.assertTrue(-74.3 < station["longitude"] < -73.6)
 
 
+
+class PlanningModelApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.body = api.planning_predictions()
+
+    def test_every_tract_with_features_has_a_prediction(self):
+        tracts = self.body["tracts"]
+        geoids = {f["properties"]["geoid"] for f in api.tract_density()["features"]}
+        self.assertGreater(len(tracts), 2100)
+        self.assertTrue(set(tracts) <= geoids)
+        for t in tracts.values():
+            self.assertTrue(0 <= t["low"] <= t["high"] <= 1)
+            self.assertTrue(0 <= t["probability"] <= 1)
+            self.assertIn(t["reason"], [None, *self.body["reasons"]])
+        # A few tracts have features but too few workers for a gold label.
+        self.assertTrue(any(t["underserved"] is None for t in tracts.values()))
+
+    def test_model_summary(self):
+        model = self.body["model"]
+        self.assertGreater(model["roc_auc"], 0.74)
+        self.assertLess(model["brier"], model["brier_prevalence_only"])
+        self.assertEqual([c["feature"] for c in model["coefficients"]], model["features"])
+        self.assertEqual({b["borough"] for b in model["boroughs"]},
+                         {"Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island"})
+
+
 if __name__ == "__main__":
     unittest.main()

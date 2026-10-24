@@ -14,6 +14,9 @@ Features per home tract, from tract_minutes_matrix (backend/travel_time.py):
 - job_share_manhattan: share of all jobs in Manhattan;
 - job_share_outside_nyc: share of all jobs outside the five boroughs.
 
+any_mode_job_features gives the first three again with bus as well as subway
+trips (backend/bus_network.py), prefixed any_mode_.
+
 Refresh the flows, from the repository root (reads ~55 MB, keeps ~3.4 MB):
     python -m backend.job_destinations --download
 """
@@ -26,6 +29,7 @@ import numpy as np
 import pandas as pd
 
 from .data_loader import DEFAULT_DATA_DIR
+from .bus_network import multimodal_minutes_matrix
 from .travel_time import tract_minutes_matrix
 
 LODES_URL = "https://lehd.ces.census.gov/data/lodes/LODES8/{state}/od/{state}_od_{part}_JT00_2023.csv.gz"
@@ -34,6 +38,7 @@ NYC_COUNTIES = ("36005", "36047", "36061", "36081", "36085")
 FLOWS_FILE = "lodes_flows.csv.gz"
 FEATURES = ("job_minutes_mean", "job_share_over_45", "job_share_over_60",
             "job_share_manhattan", "job_share_outside_nyc")
+ANY_MODE_FEATURES = ("any_mode_job_minutes_mean", "any_mode_job_share_over_45", "any_mode_job_share_over_60")
 
 
 def fetch_lodes_flows(data_dir=DEFAULT_DATA_DIR, sources=None):
@@ -70,13 +75,9 @@ def load_flows(path=DEFAULT_DATA_DIR / FLOWS_FILE):
     return flows
 
 
-def job_destination_features(tracts, data, flows=None):
-    """DataFrame of FEATURES indexed like tracts; NaN where a tract has no flows or point."""
-    flows = load_flows() if flows is None else flows
-    minutes = tract_minutes_matrix(tracts, data)
+def _minutes_to_jobs(tracts, minutes, flows):
+    """Jobs-weighted mean minutes and shares over 45 / 60 minutes, per home GEOID."""
     position = pd.Series(np.arange(len(tracts)), index=tracts.GEOID.to_numpy())
-    flows = flows[flows.home.isin(position.index) & flows.jobs.gt(0)]
-    total = flows.groupby("home").jobs.sum()
     inside = flows[flows.work.isin(position.index)].copy()
     inside["minutes"] = minutes[position[inside.home].to_numpy(), position[inside.work].to_numpy()]
     inside = inside[np.isfinite(inside.minutes)]
@@ -84,15 +85,33 @@ def job_destination_features(tracts, data, flows=None):
                              over_45=inside.jobs.where(inside.minutes > 45, 0),
                              over_60=inside.jobs.where(inside.minutes > 60, 0))
     by_home = weighted.groupby("home")[["jobs", "product", "over_45", "over_60"]].sum()
+    return pd.DataFrame({"job_minutes_mean": by_home["product"] / by_home.jobs,
+                         "job_share_over_45": by_home.over_45 / by_home.jobs,
+                         "job_share_over_60": by_home.over_60 / by_home.jobs})
+
+
+def _home_flows(tracts, flows):
+    flows = load_flows() if flows is None else flows
+    return flows[flows.home.isin(set(tracts.GEOID)) & flows.jobs.gt(0)]
+
+
+def job_destination_features(tracts, data, flows=None):
+    """DataFrame of FEATURES indexed like tracts; NaN where a tract has no flows or point."""
+    flows = _home_flows(tracts, flows)
+    total = flows.groupby("home").jobs.sum()
+    features = _minutes_to_jobs(tracts, tract_minutes_matrix(tracts, data), flows).reindex(total.index)
     manhattan = flows[flows.work.str[:5].eq("36061")].groupby("home").jobs.sum()
     outside = flows[flows.work.str.startswith("outside_")].groupby("home").jobs.sum()
-    features = pd.DataFrame({
-        "job_minutes_mean": by_home["product"] / by_home.jobs,
-        "job_share_over_45": by_home.over_45 / by_home.jobs,
-        "job_share_over_60": by_home.over_60 / by_home.jobs,
-        "job_share_manhattan": manhattan.reindex(total.index).fillna(0) / total,
-        "job_share_outside_nyc": outside.reindex(total.index).fillna(0) / total,
-    })
+    features["job_share_manhattan"] = manhattan.reindex(total.index).fillna(0) / total
+    features["job_share_outside_nyc"] = outside.reindex(total.index).fillna(0) / total
+    return features[list(FEATURES)].reindex(tracts.GEOID.to_numpy()).set_axis(tracts.index)
+
+
+def any_mode_job_features(tracts, data, flows=None, bus=None):
+    """ANY_MODE_FEATURES: the minute-based features, by bus or subway (backend/bus_network.py)."""
+    flows = _home_flows(tracts, flows)
+    features = _minutes_to_jobs(tracts, multimodal_minutes_matrix(tracts, data, bus), flows)
+    features.columns = list(ANY_MODE_FEATURES)
     return features.reindex(tracts.GEOID.to_numpy()).set_axis(tracts.index)
 
 

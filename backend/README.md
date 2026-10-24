@@ -366,6 +366,7 @@ the neighbours it trained on. With the current data:
 |---|---:|---:|---:|
 | Logistic regression, plus location | 0.77 | 0.89 | 46% |
 | Logistic regression, plus job destinations | 0.75 | 0.87 | 45% |
+| Logistic regression, plus bus | 0.76 | 0.88 | 45% |
 | Share of jobs 45+ minutes away, alone | 0.72 | 0.84 | 36% |
 | Gradient boosting, plus travel time | 0.71 | 0.82 | 39% |
 | Travel time to Manhattan, alone | 0.70 | 0.81 | 35% |
@@ -382,6 +383,88 @@ confident labels and ensembling each changed ROC AUC by 0.01 or less. The
 priority score and the k-means groups agree least with the gold labels.
 Group 0 (near the subway, higher income) is rarely underserved (10%), but
 groups 1–3 are all about 30%.
+
+
+### Planning model (`backend/planning_model.py`)
+
+The comparison above picks the most accurate model; this is the one to use. It
+is a logistic regression on four inputs: distance to the nearest station,
+population density, share of residents' jobs over 45 minutes away by bus or
+subway, and borough. It scores ROC AUC 0.77 (0.89 on confident labels), level
+with the most accurate model, and has three properties the bigger models lack:
+
+- **Calibrated.** A predicted 30% means about 30%. Within each tenth of the
+  ranking, predicted and observed rates differ by at most 0.07. Within each
+  borough they differ by at most 0.01. Without the borough terms, Staten Island
+  was predicted 50% underserved against 29% observed.
+- **Stable.** Every coefficient keeps its sign when community districts are
+  resampled 200 times. In the nine-feature model, travel features correlate up
+  to 0.97, and their coefficients flip sign.
+- **Explained.** Each tract gets a 90% interval (median width 0.08) and each
+  feature's contribution to its score.
+
+| Standardized coefficient | Value | 95% interval |
+|---|---:|---:|
+| Share of jobs 45+ minutes away by bus or subway | +1.60 | +1.31 to +1.87 |
+| Population density | +0.43 | +0.29 to +0.56 |
+| Distance to nearest station | −0.38 | −0.54 to −0.27 |
+
+Distance is negative because of cars. Among tracts whose jobs are far, 50–56%
+of those nearest a station are underserved against 35% of the farthest, and
+the farthest have the most car-owning households. Being near the subway means
+riding it to distant jobs; being far often means driving.
+
+```sh
+python -m backend.planning_model   # checks, coefficients, data/gold/planning_predictions.csv
+```
+
+The server returns the same predictions at `/api/planning-model` for every
+tract with features (labeled or not), with plain-language reasons and the
+validation numbers. The map shows them as the "Underserved risk (model)" layer;
+hovering a tract gives its chance, 90% range, main reason and the Census share
+of 60+ minute commutes. The model is fit on the first request (about 3 seconds)
+and then cached.
+
+The predictions file has, per tract, the probability, its 90% interval, an
+out-of-fold probability (made without the tract's community district), each
+feature's contribution, and `main_reason`, the tract feature that raises the
+score most.
+
+### Buses (`backend/bus_network.py`)
+
+The MTA bus GTFS feeds (five boroughs plus MTA Bus Company) are reduced to one
+weekday morning, Tuesday 2026-10-20 from 6 to 10 am: 13,165 stops and 19,726
+route-by-stop links on 342 routes, express buses included
+(`data/raw/bus_stops.csv.gz`, `data/raw/bus_links.csv.gz`, 260 KB together).
+`multimodal_minutes_matrix` gives door-to-door minutes between every pair of
+tracts by bus and subway. It charges a wait on every boarding, half the route's
+headway at that stop (at most 15 minutes) for a bus and 4 minutes for the
+subway, plus walking to, between and from stops. The matrix takes about 15
+seconds and is cached. Refresh with `python -m backend.bus_network --download`.
+
+The planning model's job-distance feature now counts bus trips. Out of fold,
+before and after:
+
+| | Subway only | Bus or subway |
+|---|---:|---:|
+| ROC AUC | 0.759 | 0.766 |
+| ROC AUC, confident labels | 0.880 | 0.892 |
+| Brier score | 0.1602 | 0.1578 |
+| Bronx (within-borough ROC AUC) | 0.64 | 0.65 |
+| Queens | 0.66 | 0.68 |
+| Staten Island | 0.59 | 0.54 |
+| Tracts over 2 km from a station | 0.58 | 0.63 |
+| Underserved tracts caught at a 30% cutoff | 64% | 69% |
+| Underserved share of the top 10% flagged | 53% | 51% |
+
+The changes are small. A paired bootstrap over community districts puts the
+overall gain at +0.007 (95% interval −0.004 to +0.019), so it is likely but not
+certain. Bus frequency near a tract (`bus_trips_per_hour_400m`,
+`bus_routes_400m`, in the `plus_bus` comparison set) adds nothing. Staten Island
+is not rankable with any of these data. Almost every Staten Island tract has
+80–90% of its jobs more than 45 minutes away, and no feature correlates with
+its long-commute share (all |ρ| < 0.15), so its 0.59 and 0.54 are both close to
+chance. Manhattan has one underserved tract, so its 0.98 says little.
 
 
 ## Subway expansion simulator

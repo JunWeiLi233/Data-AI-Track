@@ -3,8 +3,10 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from backend.supervised import (_precision_at_top, cluster_gold_summary, evaluate, feature_matrix,
-                                training_frame)
+from sklearn.metrics import roc_auc_score
+
+from backend.supervised import (_precision_at_top, cluster_gold_summary, evaluate, feature_matrix, fit_model,
+                                grouped_folds, out_of_fold_scores, training_frame)
 
 
 def synthetic(n=200, seed=0):
@@ -22,6 +24,10 @@ def synthetic(n=200, seed=0):
         "job_share_over_45": np.clip(distance / 5 + rng.uniform(-0.1, 0.1, n), 0, 1),
         "job_share_over_60": np.clip(distance / 7, 0, 1), "job_share_manhattan": rng.uniform(0, 1, n),
         "job_share_outside_nyc": rng.uniform(0, 0.3, n),
+        "any_mode_job_minutes_mean": 18 + distance * 9 + rng.uniform(0, 5, n),
+        "any_mode_job_share_over_45": np.clip(distance / 6 + rng.uniform(-0.1, 0.1, n), 0, 1),
+        "any_mode_job_share_over_60": np.clip(distance / 8, 0, 1),
+        "bus_trips_per_hour_400m": rng.uniform(0, 300, n), "bus_routes_400m": rng.integers(0, 20, n),
         "BoroName": boroughs[np.arange(n) % 5],
         "latitude": 40.7 + rng.uniform(0, 0.2, n), "longitude": -73.9 + rng.uniform(0, 0.2, n),
         "priority_score": distance / 5,
@@ -38,7 +44,8 @@ class SyntheticSupervisedTests(unittest.TestCase):
     def test_learnable_signal_beats_random(self):
         result = evaluate(synthetic()).set_index("method")
         models = {f"{m}:{f}" for m in ("logistic_regression", "gradient_boosting", "ensemble")
-                  for f in ("clustering_features", "plus_travel_time", "plus_job_destinations", "plus_location")}
+                  for f in ("clustering_features", "plus_travel_time", "plus_job_destinations", "plus_bus",
+                            "plus_location")}
         self.assertEqual(set(result.index), models | {"cluster", "priority_score", "distance_only",
                                                       "transit_minutes_only", "job_share_over_45_only"})
         self.assertGreater(result.loc["logistic_regression:plus_travel_time", "roc_auc"], 0.85)
@@ -49,6 +56,7 @@ class SyntheticSupervisedTests(unittest.TestCase):
         frame = synthetic(10)
         self.assertEqual(feature_matrix(frame, "clustering_features").shape, (10, 3))
         self.assertEqual(feature_matrix(frame, "plus_job_destinations").shape, (10, 9))
+        self.assertEqual(feature_matrix(frame, "plus_bus").shape, (10, 14))
         x = feature_matrix(frame, "plus_location")
         self.assertEqual(x.shape, (10, 9 + 5 + 2))
         self.assertTrue((x[:, 9:14].sum(axis=1) == 1).all())
@@ -83,6 +91,41 @@ class RealSupervisedTests(unittest.TestCase):
         # Knowing where residents work beats travel time to Manhattan alone.
         self.assertGreater(result.loc["logistic_regression:plus_job_destinations", "roc_auc"],
                            result.loc["transit_minutes_only", "roc_auc"])
+
+    def test_folds_never_share_a_community_district(self):
+        districts = self.frame.CDTA2020.to_numpy()
+        folds = grouped_folds(self.frame)
+        self.assertEqual(len(folds), 5)
+        for train, test in folds:
+            self.assertFalse(set(districts[train]) & set(districts[test]))
+        self.assertEqual(sorted(np.concatenate([test for _, test in folds])), list(range(len(self.frame))))
+
+    def test_shuffled_labels_score_like_random(self):
+        # If anything leaked the label into the features or the tuning, a model
+        # trained on shuffled labels would still score well.
+        frame = self.frame.copy()
+        frame["underserved"] = pd.array(np.random.default_rng(0).permutation(frame.underserved.astype(int)),
+                                         dtype="Int64")
+        scores = out_of_fold_scores(frame, n_splits=3, feature_sets=("plus_job_destinations",))
+        y = frame.underserved.astype(int)
+        for model in ("logistic_regression", "gradient_boosting"):
+            # Chance-level AUC on ~2,200 tracts has a standard deviation of about 0.013.
+            self.assertLess(abs(roc_auc_score(y, scores[f"{model}:plus_job_destinations"]) - 0.5), 0.06)
+
+    def test_borough_holdout_beats_priority_score(self):
+        # Train on four boroughs, rank tracts inside the fifth. Manhattan has one
+        # underserved tract and Staten Island ~120 tracts, too few to test.
+        x = feature_matrix(self.frame, "plus_job_destinations")
+        y = self.frame.underserved.astype(int).to_numpy()
+        borough = self.frame.BoroName.to_numpy()
+        groups = self.frame.CDTA2020.to_numpy()
+        for held_out in ("Bronx", "Brooklyn", "Queens"):
+            test, train = borough == held_out, borough != held_out
+            model = fit_model("logistic_regression", x[train], y[train], groups[train])
+            auc = roc_auc_score(y[test], model.predict_proba(x[test])[:, 1])
+            priority = roc_auc_score(y[test], self.frame.priority_score.to_numpy()[test])
+            self.assertGreater(auc, 0.6, held_out)
+            self.assertGreater(auc, priority, held_out)
 
     def test_cluster_summary_covers_frame(self):
         summary = cluster_gold_summary(self.frame)
