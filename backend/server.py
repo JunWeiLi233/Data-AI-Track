@@ -34,6 +34,8 @@ class Handler(SimpleHTTPRequestHandler):
                 body = api.existing_lines()
             elif url.path == "/api/deserts":
                 body = api.transit_deserts()
+            elif url.path == "/api/clusters":
+                body = api.tract_clusters()
             else:
                 return self._json(404, {"error": "not found"})
         except ValueError as error:

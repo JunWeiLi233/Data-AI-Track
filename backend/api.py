@@ -7,7 +7,7 @@ from pyproj import Transformer
 from shapely.geometry import mapping
 from shapely.ops import transform
 
-from . import network, optimizer
+from . import clustering, network, optimizer
 
 SQUARE_FEET_TO_KM2 = (1200 / 3937) ** 2 / 1e6  # US survey feet
 # Residential tracts beyond a 15-minute straight-line walk of any station.
@@ -61,6 +61,29 @@ def data_summary():
         "tracts": data.report["tract_rows"],
         "population": int(population.sum()),
         "tracts_missing_population": data.report["population_missing_on_tracts"],
+    }
+
+
+@lru_cache(maxsize=1)
+def tract_clusters():
+    """Neighborhood types from k-means; tracts maps GEOID to cluster for joining with /api/tracts."""
+    clustered = clustering.cluster_tracts(optimizer.context().baseline)
+    info = clustered.attrs["clustering"]
+    summary = clustering.cluster_summary(clustered)
+    eligible = clustered[clustered.cluster.notna()]
+    return {
+        "n_clusters": info["n_clusters"],
+        "silhouette": round(info["silhouette"], 3),
+        "excluded_tracts": info["excluded_tracts"],
+        "clusters": [{
+            "cluster": int(row.cluster), "name": row.cluster_name, "tracts": int(row.tracts),
+            "population": int(row.population),
+            "median_station_distance_km": round(float(row.median_station_distance_km), 3),
+            "median_density_km2": round(float(row.median_density_km2)),
+            "median_household_income": round(float(row.median_household_income)),
+            "mean_priority_score": round(float(row.mean_priority_score), 3),
+        } for row in summary.itertuples()],
+        "tracts": dict(zip(eligible.GEOID, eligible.cluster.astype(int).tolist())),
     }
 
 
