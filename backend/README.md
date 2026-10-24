@@ -17,6 +17,29 @@ entrances = data.entrances
 tracts = data.tracts
 ```
 
+## Frontend
+
+```sh
+python -m backend.server  # then open http://127.0.0.1:8000
+```
+
+`backend/server.py` (standard library only) serves `frontend/` and JSON
+endpoints built in `backend/api.py`; data is loaded once per process:
+
+- `/api/summary`: headline counts from `load_data`.
+- `/api/tracts`: tract GeoJSON with residents per km² (area measured in
+  EPSG:2263; polygons simplified for display only) and quartile class breaks.
+- `/api/stations`: the 496 physical station locations.
+- `/api/recommendations?goal=access|eff&n=1..5`: placeholder candidates
+  (`"sample": true`) until `scoring.py` exists. Replace `SAMPLE_CANDIDATES`
+  with modeled output that has `latitude`/`longitude`.
+
+The map is Leaflet 1.9.4 (from cdnjs) on OpenStreetMap tiles. OSM's volunteer
+tile servers suit development only; switch `TILE_URL` in `frontend/app.js` to a
+tile provider or self-hosted tiles before heavy use. Subway lines in
+`frontend/assets/overlays.geojson` are simplified straight segments between
+stations, and the transit desert outlines there are illustrative.
+
 All outputs are pandas DataFrames except `report`, a dictionary suitable for
 Streamlit display. The default data path is relative to this module, independent
 of the frontend's working directory. Loaders only read CSVs and never save them.
