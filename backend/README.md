@@ -61,7 +61,7 @@ ValueError instead of multiplying rows or silently guessing identifiers.
 Numeric demographic extremes are retained: outlier treatment belongs in the
 subsequent scoring model and should not alter observed source estimates. Source
 vintages and tract definitions should be checked before interpreting unmatched
-GEOIDs; the loader does not infer a crosswalk. Scoring is documented below. Simulation is not implemented.
+GEOIDs; the loader does not infer a crosswalk. Scoring and geographic expansion simulation are documented below.
 
 
 ## Government infrastructure planning: underserved tract scoring
@@ -147,7 +147,7 @@ an uncertain household estimate, not individual wealth. Margins of error are
 retained but not modeled, and top-coded high incomes are lower bounds. Reciprocal
 income emphasizes low-income differences; clipping reduces, but does not remove,
 that modeling choice. Missing-income neutrality can overstate or understate need.
-No station catchment populations, simulation or frontend are implemented here.
+No station catchment population model or frontend is implemented here.
 
 
 ### Fixed baseline normalization for future expansion scenarios
@@ -160,8 +160,9 @@ improvements or making unchanged tracts appear more underserved.
 ```python
 baseline = score_tracts(data)
 bounds = baseline.attrs["scoring"]["normalization_bounds"]
-# scenario_data is a SubwayData with a proposed station inventory, provided
-# by a future simulator; demographics and tract reference points stay fixed.
+# scenario_data is a SubwayData with a proposed station inventory;
+# demographics and tract reference points stay fixed. The simulator below
+# performs this fixed-baseline comparison automatically.
 # scenario = score_tracts(scenario_data, normalization_bounds=bounds)
 # Compare priority_score and nearest_station_distance_km by GEOID.
 ```
@@ -191,3 +192,126 @@ benefit-cost ratios, ridership, displacement, environmental impacts or causal
 community benefits. Government investment decisions need those analyses, broader
 equity evidence and community input. The project pitch's AI capabilities should
 be distinguished from this transparent rule-based scoring module.
+
+
+## Subway expansion simulator
+
+`backend.simulator` supports city planners comparing **station additions** to the
+same existing network, including Staten Island Railway. It reuses `score_tracts`
+for all distances, components and rankings. The baseline is scored once per
+comparison; all proposals use exactly its fitted normalization bounds, weights,
+tracts and demographics. The underlying data and input DataFrames are not modified.
+There are no writes, commits, network calls or frontend/Snowflake integrations.
+
+```python
+from backend.data_loader import load_data
+from backend.simulator import simulate_expansion, compare_scenarios
+
+data = load_data()
+one = simulate_expansion(
+    {"latitude": 40.75, "longitude": -73.72, "name": "Hypothetical A"},
+    data,
+    min_distance_improvement_km=0.1,  # 100 meters
+)
+tract_map = one.tracts
+station_map = one.proposed_stations
+metrics = one.summary
+
+comparison = compare_scenarios(
+    {
+        "No change": [],
+        "Option A": [{"latitude": 40.75, "longitude": -73.72}],
+        "Option B": [
+            {"latitude": 40.75, "longitude": -73.72},
+            {"latitude": 40.76, "longitude": -73.75},
+        ],
+    },
+    data,
+    weights={"distance": 0.5, "population": 0.3, "income": 0.2},
+    min_distance_improvement_km=0.1,
+)
+dashboard_table = comparison.summary
+baseline_map = comparison.baseline
+option_a_map = comparison.scenarios["Option A"].tracts
+```
+
+These are illustrative coordinates, not recommended locations. Proposals accept
+one station mapping, a sequence of mappings, or a DataFrame with explicit
+`latitude`/`longitude` columns. Coordinates must be finite and within global
+latitude/longitude bounds. Invalid proposals raise ValueError rather than being
+silently dropped. Numeric text is accepted; booleans are rejected. Optional
+labels remain in the station map output. Exact duplicate coordinates within a
+proposal collapse to one row. A proposal matching an existing station adds no
+accessibility improvement. `proposed_station_locations` counts unique submitted
+locations, including any already present. An empty list is a valid no-change
+reference. Scenario names must be nonempty strings.
+
+Scenarios are **independent alternatives**, not cumulative. Each keeps all
+existing stations and adds only its own proposals, so nearest-station distances
+cannot worsen. Tract comparisons join by string GEOID rather than rank or row
+order. Bounds are fitted on the supplied baseline dataset; use the same full
+loader output for comparisons and filter the returned map afterward.
+`clip_quantiles` and `weights` remain configurable through the scoring interface.
+Missing-income handling and zero-population ranking exclusion are unchanged.
+
+### Benefit definitions and denominators
+
+- A residential tract is assessable when it has a known positive integer
+  population and valid baseline and proposed distances. Missing income does not
+  prevent geographic benefit assessment.
+- `distance_improvement_km = baseline_distance - proposed_distance`. A tract is
+  `benefited` when assessable, the improvement is **strictly positive**, and it is
+  **at least** `min_distance_improvement_km`. The default is 0.1 km. Thresholds must
+  be finite and nonnegative. With zero threshold, unchanged tracts still do not
+  count. Thresholds affect benefit counts, not distances or scoring.
+- `population_potentially_benefiting` sums the entire population estimate of each
+  qualifying tract **once per scenario**, even if multiple proposed stations
+  improve it. Counts across alternative scenarios must not be added together.
+  This is a tract-level potential benefit estimate, not observed or forecast
+  ridership or a count of residents within a station catchment.
+- `population_weighted_average_distance_reduction_km` is
+  `sum(population * distance_improvement_km) / sum(population)` over **all
+  assessable residential tracts**, including unchanged tracts and improvements
+  below the threshold. `population_evaluated` exposes that denominator. The mean
+  is `None` when no residential population can be assessed (a summary DataFrame
+  may display this as NaN). It is not the average among beneficiaries alone.
+- Zero-population and unknown/invalid-population tracts remain in the tract/map
+  tables but contribute neither residential benefit counts nor weighted means.
+  Missing distances remain missing, not zero. Summary diagnostics report unknown
+  population and positive-population tracts without valid distances.
+
+### Structured result fields
+
+`simulate_expansion` returns a `ScenarioResult` with `name`, `proposed_stations`,
+`tracts`, `summary`, and `scoring_metadata`. The tract DataFrame retains baseline
+geography, coordinates, demographics and missing-income flags. Scoring outputs
+have `baseline_` and `proposed_` prefixes: `nearest_station_distance_km`,
+`distance_score`, `population_score`, `income_disadvantage_score`,
+`priority_score`, `rank`, `score_eligible`. Additional fields are
+`distance_improvement_km`, `priority_score_reduction`,
+`residential_benefit_eligible` and `benefited`. Lower proposed priority reflects
+reduced modeled need. Normalization saturation can mask distance improvements
+in scores; inspect raw distances alongside scores. Rank changes are not benefits.
+
+`compare_scenarios` returns a `ScenarioComparison`: the full `baseline` scoring
+DataFrame, named `scenarios` mapping to ScenarioResults, a side-by-side `summary`
+DataFrame (one row per option), and `metadata` with the baseline reference and
+benefit definitions. For maps, use retained latitude/longitude or WKT/geometry;
+for dashboard charts, use the summary table. These are Python dataclasses and
+DataFrames, not JSON HTTP responses; serialize only the required columns in a
+future API layer. Baseline/scenario scoring metadata makes component scales and
+weights inspectable.
+
+### Simulation limitations
+
+This is a **geographic accessibility simulation using straight-line Haversine
+distance**, not a construction feasibility, ridership or travel-time prediction
+model. Coordinates are range-validated, not checked for land, jurisdiction,
+engineering suitability, network connections or service availability. A proposed
+station is assumed to operate with no changes to existing service. No tracks,
+service plans, entrances, costs, capacity, terrain or street routes are modeled.
+A closer point across water may not offer a practical journey. Tract interior
+points and whole-tract population counts can overstate or understate resident
+benefits and must be labeled as proxies in the dashboard. Results support
+screening and comparison for government planning; they do not establish causal
+benefits or replace engineering review, equity analysis and community input.
