@@ -247,6 +247,55 @@ equity evidence and community input. The project pitch's AI capabilities should
 be distinguished from this transparent rule-based scoring module.
 
 
+## Neighborhood types (`backend/clustering.py`)
+
+I added a machine learning model that sorts tracts into neighborhood types. We
+have no labels that say which tracts are underserved, so I did not train a model
+to predict that. It would only learn to copy the scoring formula above. Instead I
+used k-means clustering, which groups tracts that look alike without needing any
+labels.
+
+Each tract is described by three numbers. They are the distance to the nearest
+station from `score_tracts`, residents per km² with area measured in EPSG:2263
+like the frontend, and median household income. I take the log of each, since
+all three are skewed, and then standardize them so no single number dominates.
+
+```python
+from backend.clustering import cluster_tracts, cluster_summary
+
+clustered = cluster_tracts()             # 4 groups by default
+clustered = cluster_tracts(scored, 6)    # reuse an existing score_tracts result
+print(cluster_summary(clustered))        # one row per group
+```
+
+```sh
+python -m backend.clustering --clusters 4
+```
+
+The server also returns the groups at `/api/clusters`. The `tracts` field maps
+each GEOID to its group number so the map can join it with `/api/tracts`.
+
+Group 0 is always the one closest to the subway, and each group gets a plain name
+such as "Dense, lower income". The 126 tracts with no residents, no income
+estimate or bad geometry get no group, and nothing is filled in for them. The
+result does not change if the input rows are shuffled.
+
+With the current data the four groups look like this.
+
+| Group | Name | Tracts | Residents | Median distance | Mean priority |
+|---:|---|---:|---:|---:|---:|
+| 0 | Near the subway, dense, higher income | 603 | 2.68M | 0.31 km | 0.18 |
+| 1 | Dense, lower income | 662 | 2.94M | 0.37 km | 0.25 |
+| 2 | Spread out | 621 | 1.80M | 0.83 km | 0.19 |
+| 3 | Very far from the subway, spread out | 313 | 1.02M | 3.34 km | 0.41 |
+
+The silhouette score is about 0.31, which means the groups are real but they
+overlap. Three to six groups all score about the same, so four is a readability
+choice and not a discovery. The names describe the group as a whole, and a single
+tract can differ from its group's name. Distances are straight lines, and the
+model knows nothing about buses, travel time or cost.
+
+
 ## Subway expansion simulator
 
 `backend.simulator` supports city planners comparing **station additions** to the
