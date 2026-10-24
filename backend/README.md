@@ -384,6 +384,48 @@ Group 0 (near the subway, higher income) is rarely underserved (10%), but
 groups 1–3 are all about 30%.
 
 
+### Planning model (`backend/planning_model.py`)
+
+The comparison above picks the most accurate model; this is the one to use. It
+is a logistic regression on four inputs: distance to the nearest station,
+population density, share of residents' jobs over 45 subway minutes away, and
+borough. It gives up a little accuracy (ROC AUC 0.76, against 0.77 for all nine
+features) for three properties the bigger models lack:
+
+- **Calibrated.** A predicted 30% means about 30%. Within each tenth of the
+  ranking, predicted and observed rates differ by at most 0.08. Within each
+  borough they differ by at most 0.01. Without the borough terms, Staten Island
+  was predicted 50% underserved against 29% observed.
+- **Stable.** Every coefficient keeps its sign when community districts are
+  resampled 200 times. In the nine-feature model, travel features correlate up
+  to 0.97, and their coefficients flip sign.
+- **Explained.** Each tract gets a 90% interval (median width 0.09) and each
+  feature's contribution to its score.
+
+| Standardized coefficient | Value | 95% interval |
+|---|---:|---:|
+| Share of jobs 45+ minutes away | +1.58 | +1.27 to +1.92 |
+| Population density | +0.43 | +0.27 to +0.57 |
+| Distance to nearest station | −0.55 | −0.78 to −0.42 |
+
+Distance is negative because of cars. Among tracts whose jobs are far, 50–56%
+of those nearest a station are underserved against 35% of the farthest, and
+the farthest have the most car-owning households. Being near the subway means
+riding it to distant jobs; being far often means driving.
+
+```sh
+python -m backend.planning_model   # checks, coefficients, data/gold/planning_predictions.csv
+```
+
+The predictions file has, per tract, the probability, its 90% interval, an
+out-of-fold probability (made without the tract's community district), each
+feature's contribution, and `main_reason`, the tract feature that raises the
+score most. Limits: within-borough ranking is weak in Staten Island (ROC AUC
+0.59) and the Bronx (0.64), probably because buses and express buses matter
+there and are not modeled. Manhattan has one underserved tract, so its 0.98
+says little.
+
+
 ## Subway expansion simulator
 
 `backend.simulator` supports city planners comparing **station additions** to the
