@@ -303,6 +303,69 @@ tract can differ from its group's name. Distances are straight lines, and the
 model knows nothing about buses, travel time or cost.
 
 
+## Gold labels and supervised check (`backend/gold_labels.py`, `backend/supervised.py`)
+
+To check the score and the groups against something real, the gold labels use
+an outcome none of the methods see: how long residents take to get to work.
+A tract is labeled underserved when its share of workers commuting 60+ minutes
+(ACS 2024 5-year table B08303) is in the top quarter of NYC tracts. The share of
+car-free households (B25044) is kept as a second, descriptive column. Tracts
+with fewer than 100 workers get no label, and nothing is filled in.
+
+The source CSVs `data/raw/commute_time.csv` and `data/raw/vehicles.csv` are the
+NYC tract rows of the Census Bureau's public summary files (no API key needed).
+The gold table is written to `data/gold/gold_labels.csv`.
+
+```sh
+python -m backend.gold_labels --download   # refresh the two source CSVs
+python -m backend.gold_labels               # rebuild data/gold/gold_labels.csv
+python -m backend.supervised                # compare every method to the labels
+```
+
+ACS tract estimates are noisy. For about half the labeled tracts the 60+ minute
+share is within its 90% margin of error of the cutoff, so another survey sample
+could flip the label. `label_confident` marks the rest, and results are also
+scored on those tracts alone. This noise caps how well any method can score.
+
+### Travel time (`backend/travel_time.py`)
+
+`transit_minutes_to_jobs` estimates a subway trip from each tract to Midtown or
+Lower Manhattan, whichever is quicker. It walks to the best of the three
+nearest stations, then rides the network: the reconstructed lines plus one
+spanning tree per train route, so trains cross named-line junctions and express
+routes skip local stops. It assumes 27 km/h on trains and 4.8 km/h walking with
+a 1.3 street detour, a 5-minute penalty for walking between platforms, and the
+ferry for Staten Island. Waits, frequency and buses are not modeled, so these
+are rough planning estimates (149 St–Grand Concourse about 20 min, Tottenville
+about 82 min).
+
+### Results
+
+`backend.supervised` trains logistic regression and gradient boosting on three
+feature sets: the clustering features; those plus travel time; and those plus
+borough and coordinates. Hyperparameters are tuned inside each training fold.
+Folds are grouped by community district (`CDTA2020`), so a model is never tested
+on the neighbours it trained on. With the current data:
+
+| Method | ROC AUC | ROC AUC, confident labels | Underserved in top quarter |
+|---|---:|---:|---:|
+| Gradient boosting, plus location | 0.73 | 0.85 | 39% |
+| Logistic regression, plus location | 0.72 | 0.82 | 39% |
+| Gradient boosting, plus travel time | 0.71 | 0.82 | 39% |
+| Travel time alone | 0.70 | 0.81 | 35% |
+| Logistic regression, clustering features | 0.61 | 0.70 | 30% |
+| Distance only | 0.61 | 0.70 | 35% |
+| k-means groups | 0.56 | 0.61 | 25% |
+| Priority score | 0.55 | 0.60 | 29% |
+
+Random ranking scores 0.5 and 25%. Travel time is the feature that matters:
+alone it beats every method built on distance, density and income. Borough and
+coordinates add a little more, but they make the model harder to explain.
+The priority score and the k-means groups agree least with the gold labels.
+Group 0 (near the subway, higher income) is rarely underserved (10%), but
+groups 1–3 are all about 30%.
+
+
 ## Subway expansion simulator
 
 `backend.simulator` supports city planners comparing **station additions** to the
