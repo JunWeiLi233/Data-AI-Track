@@ -315,3 +315,29 @@ points and whole-tract population counts can overstate or understate resident
 benefits and must be labeled as proxies in the dashboard. Results support
 screening and comparison for government planning; they do not establish causal
 benefits or replace engineering review, equity analysis and community input.
+
+## Snowflake
+
+I set up one shared Snowflake account for the team. The cleaned tables live in
+`TRANSIT_GAP.PUBLIC` as `STATIONS`, `ENTRANCES` and `TRACTS`, and everyone uses
+the `TRANSIT_TEAM` role and the `TRANSIT_WH` warehouse.
+
+The account owner runs `snowflake/setup.sql` once in a Snowsight worksheet as
+ACCOUNTADMIN. The bottom of that file has a template for adding each teammate.
+
+Each teammate then copies `.env.example` to `.env` and fills in their own login.
+The `.env` file stays on your machine and git ignores it, so please never commit
+a password.
+
+```sh
+python -m backend.snowflake_client --check   # test the login and Cortex
+python -m backend.snowflake_client           # upload the three tables, then test Cortex
+```
+
+Uploading replaces the tables each time, so it is safe to run again after the
+loader changes. Column names become upper case with underscores, so
+`Station Name` turns into `STATION_NAME`. Tract shapes stay as WKT text in
+`THE_GEOM`, and merged station IDs and names are joined with ` | `.
+
+If Cortex says the model is not available, set `SNOWFLAKE_CORTEX_MODEL` in `.env`
+to another model or turn on cross-region inference near the end of `setup.sql`.
