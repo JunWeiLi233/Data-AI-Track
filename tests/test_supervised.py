@@ -24,6 +24,10 @@ def synthetic(n=200, seed=0):
         "job_share_over_45": np.clip(distance / 5 + rng.uniform(-0.1, 0.1, n), 0, 1),
         "job_share_over_60": np.clip(distance / 7, 0, 1), "job_share_manhattan": rng.uniform(0, 1, n),
         "job_share_outside_nyc": rng.uniform(0, 0.3, n),
+        "any_mode_job_minutes_mean": 18 + distance * 9 + rng.uniform(0, 5, n),
+        "any_mode_job_share_over_45": np.clip(distance / 6 + rng.uniform(-0.1, 0.1, n), 0, 1),
+        "any_mode_job_share_over_60": np.clip(distance / 8, 0, 1),
+        "bus_trips_per_hour_400m": rng.uniform(0, 300, n), "bus_routes_400m": rng.integers(0, 20, n),
         "BoroName": boroughs[np.arange(n) % 5],
         "latitude": 40.7 + rng.uniform(0, 0.2, n), "longitude": -73.9 + rng.uniform(0, 0.2, n),
         "priority_score": distance / 5,
@@ -40,7 +44,8 @@ class SyntheticSupervisedTests(unittest.TestCase):
     def test_learnable_signal_beats_random(self):
         result = evaluate(synthetic()).set_index("method")
         models = {f"{m}:{f}" for m in ("logistic_regression", "gradient_boosting", "ensemble")
-                  for f in ("clustering_features", "plus_travel_time", "plus_job_destinations", "plus_location")}
+                  for f in ("clustering_features", "plus_travel_time", "plus_job_destinations", "plus_bus",
+                            "plus_location")}
         self.assertEqual(set(result.index), models | {"cluster", "priority_score", "distance_only",
                                                       "transit_minutes_only", "job_share_over_45_only"})
         self.assertGreater(result.loc["logistic_regression:plus_travel_time", "roc_auc"], 0.85)
@@ -51,6 +56,7 @@ class SyntheticSupervisedTests(unittest.TestCase):
         frame = synthetic(10)
         self.assertEqual(feature_matrix(frame, "clustering_features").shape, (10, 3))
         self.assertEqual(feature_matrix(frame, "plus_job_destinations").shape, (10, 9))
+        self.assertEqual(feature_matrix(frame, "plus_bus").shape, (10, 14))
         x = feature_matrix(frame, "plus_location")
         self.assertEqual(x.shape, (10, 9 + 5 + 2))
         self.assertTrue((x[:, 9:14].sum(axis=1) == 1).all())

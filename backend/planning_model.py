@@ -4,7 +4,8 @@ backend.supervised compares many methods; this module fits the one picked for
 trust over the last bit of accuracy. It is a logistic regression on:
 - log distance to the nearest station;
 - log population density;
-- share of residents' jobs over 45 subway minutes away (job_destinations);
+- share of residents' jobs over 45 minutes away by bus or subway
+  (job_destinations.any_mode_job_features);
 - borough (Manhattan is the baseline).
 
 Why these: the nine-feature model scores ROC AUC 0.77 against 0.76 here, but
@@ -53,7 +54,8 @@ def planning_features(frame):
     features = pd.DataFrame({
         "log_station_distance": np.log1p(frame.nearest_station_distance_km.astype("float64")),
         "log_density": np.log(frame.population_density_km2.astype("float64")),
-        "job_share_over_45": frame.job_share_over_45.astype("float64"),
+        # Bus as well as subway: it ranks far-from-subway tracts better (backend README).
+        "job_share_over_45": frame.any_mode_job_share_over_45.astype("float64"),
     }, index=frame.index)
     for column, borough in BOROUGHS.items():
         features[column] = frame.BoroName.eq(borough).astype("float64")

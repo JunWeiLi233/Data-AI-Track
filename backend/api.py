@@ -16,7 +16,7 @@ BOOLEAN = {"1": True, "true": True, "0": False, "false": False}
 # Plain-language reasons for planning_model.main_reason; each says why the
 # feature raises a tract's chance of being underserved.
 PLANNING_REASONS = {
-    "job_share_over_45": "Many residents' jobs are 45+ minutes away by subway",
+    "job_share_over_45": "Many residents' jobs are 45+ minutes away by bus or subway",
     "log_station_distance": "Close to a station, so residents ride to distant jobs rather than drive",
     "log_density": "Dense neighborhood, with fewer car commuters",
 }
