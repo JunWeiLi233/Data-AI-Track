@@ -63,7 +63,7 @@ input[type=range]{accent-color:#2457D6}
 </div>
 <label style="display: flex; flex-direction: column; gap: 8px">
 <span style="display: flex; justify-content: space-between"><span>Number of stations</span><strong>{{n}}</strong></span>
-<input type="range" min="1" max="5" step="1" value="{{n}}" data-ev-change="setN" style="width: 100%">
+<input type="range" min="1" max="10" step="1" value="{{n}}" data-ev-change="setN" style="width: 100%">
 </label>
 </div>
 
@@ -110,11 +110,11 @@ input[type=range]{accent-color:#2457D6}
 <div style="display: flex; justify-content: space-between; font-size: 12px; color: #5B6472"><span>{{densityLow}}</span><span>{{densityHigh}}</span></div>
 </div>
 <div style="display: flex; flex-direction: column; gap: 8px; border-top: 1px solid #EDF0F4; padding-top: 10px; font-size: 13px">
-<span style="display: flex; align-items: center; gap: 10px"><span style="width: 22px; height: 3px; border-radius: 2px; background: #0039A6"></span>Existing line (simplified)</span>
+<span style="display: flex; align-items: center; gap: 10px"><span style="width: 22px; height: 3px; border-radius: 2px; background: #0039A6"></span>Existing line (station to station)</span>
 <span style="display: flex; align-items: center; gap: 10px"><span style="width: 10px; height: 10px; border-radius: 50%; background: #FFFFFF; border: 2px solid #3A414B; margin: 0 6px"></span>Existing station</span>
 <span style="display: flex; align-items: center; gap: 10px"><span style="width: 14px; height: 14px; border-radius: 50%; background: #E5484D; border: 2px solid #FFFFFF; box-shadow: 0 0 0 1px #E5484D; margin: 0 4px"></span>Recommended station</span>
 <span style="display: flex; align-items: center; gap: 10px"><span style="width: 18px; height: 18px; border-radius: 50%; background: rgba(229,72,77,0.22); border: 1px solid rgba(229,72,77,0.5); margin: 0 2px"></span>10-min walk area (≈800 m)</span>
-<span style="display: flex; align-items: center; gap: 10px"><span style="width: 22px; height: 14px; border-radius: 50%; border: 1.5px dashed #C4363B"></span>Transit desert</span>
+<span style="display: flex; align-items: center; gap: 10px"><span style="width: 22px; height: 14px; border-radius: 50%; border: 1.5px dashed #C4363B"></span>Transit desert (&gt; 15-min walk)</span>
 </div>
 </div>
 <div style="position: absolute; z-index: 1000; right: 14px; bottom: 30px; display: flex; flex-direction: column; background: #FFFFFF; border-radius: 10px; box-shadow: 0 2px 10px rgba(18,22,28,0.10); overflow: hidden">
@@ -140,11 +140,12 @@ input[type=range]{accent-color:#2457D6}
 <div style="display: flex; flex-direction: column; gap: 2px">
 <h3 style="margin: 0; font-size: 16px; font-weight: 700">{{s.name}}</h3>
 <span style="color: #5B6472; font-size: 13px">{{s.near}}</span>
+<span style="color: #5B6472; font-size: 12px">{{s.borough}}</span>
 </div>
 <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px">
-<div style="display: flex; flex-direction: column; gap: 2px"><strong style="font-size: 17px">{{s.residents}}</strong><span style="font-size: 12px; color: #5B6472">Residents served</span></div>
-<div style="display: flex; flex-direction: column; gap: 2px"><strong style="font-size: 17px">{{s.mins}}</strong><span style="font-size: 12px; color: #5B6472">Avg. travel time</span></div>
-<div style="display: flex; flex-direction: column; gap: 2px"><strong style="font-size: 17px">{{s.score}}</strong><span style="font-size: 12px; color: #5B6472">Access score</span></div>
+<div style="display: flex; flex-direction: column; gap: 2px"><strong style="font-size: 17px">{{s.residents}}</strong><span style="font-size: 12px; color: #5B6472">New within 10 min</span></div>
+<div style="display: flex; flex-direction: column; gap: 2px"><strong style="font-size: 17px">{{s.mins}}</strong><span style="font-size: 12px; color: #5B6472">Avg. walk saved</span></div>
+<div style="display: flex; flex-direction: column; gap: 2px"><strong style="font-size: 17px">{{s.score}}</strong><span style="font-size: 12px; color: #5B6472">Need score</span></div>
 </div>
 </div>
 </article>
@@ -160,26 +161,26 @@ input[type=range]{accent-color:#2457D6}
 <section aria-label="Population coverage" style="background: #FFFFFF; border: 1px solid #E3E7ED; border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 14px">
 <h2 style="margin: 0; font-size: 16px; font-weight: 700">Population coverage</h2>
 <div style="display: flex; align-items: center; gap: 20px">
-<svg width="120" height="120" viewBox="0 0 120 120" role="img" aria-label="92 percent of residents within a 10-minute walk"><circle cx="60" cy="60" r="50" fill="none" stroke="#E8EFFD" stroke-width="16"></circle><circle cx="60" cy="60" r="50" fill="none" stroke="#2457D6" stroke-width="16" stroke-dasharray="289 314" transform="rotate(-90 60 60)"></circle><text x="60" y="67" text-anchor="middle" font-size="22" font-weight="700" fill="#12161C">92%</text></svg>
+<svg width="120" height="120" viewBox="0 0 120 120" role="img" aria-label="{{coveragePct}} percent of residents within a 10-minute walk"><circle cx="60" cy="60" r="50" fill="none" stroke="#E8EFFD" stroke-width="16"></circle><circle cx="60" cy="60" r="50" fill="none" stroke="#2457D6" stroke-width="16" stroke-dasharray="{{coverageDash}} 314" transform="rotate(-90 60 60)"></circle><text x="60" y="67" text-anchor="middle" font-size="22" font-weight="700" fill="#12161C">{{coveragePct}}%</text></svg>
 <div style="display: flex; flex-direction: column; gap: 4px">
-<strong style="font-size: 24px">7.4M</strong>
+<strong style="font-size: 24px">{{coveredAfter}}</strong>
 <span style="color: #5B6472">residents within a 10-min walk</span>
 <strong style="font-size: 20px; color: #127A3E; margin-top: 6px">+{{added}}</strong>
 <span style="color: #5B6472">additional residents vs. today</span>
 </div>
 </div>
 </section>
-<section aria-label="Average travel time" style="background: #FFFFFF; border: 1px solid #E3E7ED; border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 14px">
-<h2 style="margin: 0; font-size: 16px; font-weight: 700">Average travel time</h2>
+<section aria-label="Average walk to a station" style="background: #FFFFFF; border: 1px solid #E3E7ED; border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 14px">
+<h2 style="margin: 0; font-size: 16px; font-weight: 700">Average walk to a station</h2>
 <div style="display: flex; align-items: flex-end; gap: 24px; justify-content: space-between">
 <div style="display: flex; flex-direction: column; gap: 4px">
-<strong style="font-size: 30px">28 min</strong>
-<strong style="font-size: 18px; color: #127A3E">↓ 15%</strong>
+<strong style="font-size: 30px">{{walkAfter}} min</strong>
+<strong style="font-size: 18px; color: #127A3E">↓ {{walkDropPct}}%</strong>
 <span style="color: #5B6472">vs. current network</span>
 </div>
 <div style="display: flex; align-items: flex-end; gap: 16px; height: 130px">
-<div style="display: flex; flex-direction: column; align-items: center; gap: 6px"><span style="font-weight: 600">33 min</span><span style="width: 56px; height: 90px; background: #C5CBD3; border-radius: 4px 4px 0 0"></span><span style="font-size: 12px; color: #5B6472">Current</span></div>
-<div style="display: flex; flex-direction: column; align-items: center; gap: 6px"><span style="font-weight: 600">28 min</span><span style="width: 56px; height: 76px; background: #2457D6; border-radius: 4px 4px 0 0"></span><span style="font-size: 12px; color: #12161C; font-weight: 600">Optimized</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; gap: 6px"><span style="font-weight: 600">{{walkBefore}} min</span><span style="width: 56px; height: 90px; background: #C5CBD3; border-radius: 4px 4px 0 0"></span><span style="font-size: 12px; color: #5B6472">Current</span></div>
+<div style="display: flex; flex-direction: column; align-items: center; gap: 6px"><span style="font-weight: 600">{{walkAfter}} min</span><span style="width: 56px; height: {{walkBarAfter}}px; background: #2457D6; border-radius: 4px 4px 0 0"></span><span style="font-size: 12px; color: #12161C; font-weight: 600">Optimized</span></div>
 </div>
 </div>
 </section>
@@ -196,12 +197,12 @@ input[type=range]{accent-color:#2457D6}
 <section aria-label="Key improvements" style="background: #FFFFFF; border: 1px solid #E3E7ED; border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 12px">
 <h2 style="margin: 0; font-size: 16px; font-weight: 700">Key improvements</h2>
 <div style="display: flex; align-items: center; gap: 12px"><span style="width: 36px; height: 36px; border-radius: 50%; background: #E8EFFD; display: flex; align-items: center; justify-content: center; flex-shrink: 0"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#2457D6" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="8" r="3.5"></circle><path d="M3 20 C3 15.5 15 15.5 15 20"></path><path d="M16 4.5 A3.5 3.5 0 0 1 16 11.5 M18 15 C20 16 21 17.5 21 20"></path></svg></span><div style="display: flex; flex-direction: column"><strong>+{{added}}</strong><span style="color: #5B6472; font-size: 13px">additional residents served</span></div></div>
-<div style="display: flex; align-items: center; gap: 12px"><span style="width: 36px; height: 36px; border-radius: 50%; background: #E8EFFD; display: flex; align-items: center; justify-content: center; flex-shrink: 0"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#2457D6" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7 V12 L15.5 14"></path></svg></span><div style="display: flex; flex-direction: column"><strong>−5 min</strong><span style="color: #5B6472; font-size: 13px">average travel time</span></div></div>
-<div style="display: flex; align-items: center; gap: 12px"><span style="width: 36px; height: 36px; border-radius: 50%; background: #E8EFFD; display: flex; align-items: center; justify-content: center; flex-shrink: 0"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#2457D6" stroke-width="2" stroke-linecap="round"><path d="M5 20 V13 M10 20 V9 M15 20 V12 M20 20 V5"></path></svg></span><div style="display: flex; flex-direction: column"><strong>Better connectivity</strong><span style="color: #5B6472; font-size: 13px">across Queens and Brooklyn</span></div></div>
+<div style="display: flex; align-items: center; gap: 12px"><span style="width: 36px; height: 36px; border-radius: 50%; background: #E8EFFD; display: flex; align-items: center; justify-content: center; flex-shrink: 0"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#2457D6" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7 V12 L15.5 14"></path></svg></span><div style="display: flex; flex-direction: column"><strong>−{{walkSaved}} min</strong><span style="color: #5B6472; font-size: 13px">average walk to a station</span></div></div>
+<div style="display: flex; align-items: center; gap: 12px"><span style="width: 36px; height: 36px; border-radius: 50%; background: #E8EFFD; display: flex; align-items: center; justify-content: center; flex-shrink: 0"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#2457D6" stroke-width="2" stroke-linecap="round"><path d="M5 20 V13 M10 20 V9 M15 20 V12 M20 20 V5"></path></svg></span><div style="display: flex; flex-direction: column"><strong>{{onLineLabel}}</strong><span style="color: #5B6472; font-size: 13px">{{boroughLabel}}</span></div></div>
 </section>
 </div>
 
-<p id="data" style="margin: 0; font-size: 12px; color: #5B6472; line-height: 1.5">{{dataSummary}} Recommendations and impact figures are sample values for design purposes only; they are not modeled results. Basemap © OpenStreetMap contributors. Tract boundaries and population: NYC Open Data and the U.S. Census Bureau ACS. Subway lines are simplified straight segments between stations; walk areas are 800 m circles.</p>
+<p id="data" style="margin: 0; font-size: 12px; color: #5B6472; line-height: 1.5">{{dataSummary}} Stations are placed greedily on candidate sites every 200 m along the existing lines (or, when allowed, at tract centers off the network) using the backend scoring model, then checked with the expansion simulator. Distances are straight-line, walks assume 80 m per minute, and need scores reflect distance, population and income; they are planning proxies, not ridership or cost forecasts. Basemap © OpenStreetMap contributors. Tract boundaries and population: NYC Open Data and the U.S. Census Bureau ACS. Existing lines are rebuilt from the GTFS stations and the named lines in the entrance data, drawn station to station; walk areas are 800 m circles.</p>
 </main>
 </div></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>

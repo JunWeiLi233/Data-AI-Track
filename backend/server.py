@@ -22,13 +22,18 @@ class Handler(SimpleHTTPRequestHandler):
         query = {k: v[-1] for k, v in parse_qs(url.query).items()}
         try:
             if url.path == "/api/recommendations":
-                body = api.recommendations(query.get("goal", "access"), query.get("n", api.MAX_STATIONS))
+                body = api.recommendations(**{k: query[k] for k in ("goal", "n", "along", "spacing", "budget")
+                                              if k in query})
             elif url.path == "/api/summary":
                 body = api.data_summary()
             elif url.path == "/api/stations":
                 body = api.existing_stations()
             elif url.path == "/api/tracts":
                 body = api.tract_density()
+            elif url.path == "/api/lines":
+                body = api.existing_lines()
+            elif url.path == "/api/deserts":
+                body = api.transit_deserts()
             else:
                 return self._json(404, {"error": "not found"})
         except ValueError as error:

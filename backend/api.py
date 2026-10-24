@@ -7,47 +7,47 @@ from pyproj import Transformer
 from shapely.geometry import mapping
 from shapely.ops import transform
 
-from .data_loader import DEFAULT_DATA_DIR
+from . import network, optimizer
 
 SQUARE_FEET_TO_KM2 = (1200 / 3937) ** 2 / 1e6  # US survey feet
-GOALS = ("access", "eff")
-MAX_STATIONS = 5
-
-# Placeholder candidates until backend/scoring.py produces modeled results.
-SAMPLE_CANDIDATES = [
-    {"id": "eq", "name": "Eastern Queens", "near": "Near 225th St & Springfield Blvd",
-     "latitude": 40.72303, "longitude": -73.74421, "residents": 18500, "minutes_saved": 12, "score": 87},
-    {"id": "cq", "name": "Central Queens", "near": "Near Union Tpke & 164th St",
-     "latitude": 40.71800, "longitude": -73.80021, "residents": 14200, "minutes_saved": 10, "score": 78},
-    {"id": "sb", "name": "Southern Brooklyn", "near": "Near Flatbush Ave & Ave D",
-     "latitude": 40.64001, "longitude": -73.95622, "residents": 12800, "minutes_saved": 9, "score": 74},
-    {"id": "eb", "name": "Eastern Brooklyn", "near": "Near Livonia Ave & Van Siclen Ave",
-     "latitude": 40.66502, "longitude": -73.89023, "residents": 11600, "minutes_saved": 8, "score": 72},
-    {"id": "sq", "name": "Southeast Queens", "near": "Near Cross Bay Blvd & 157th Ave",
-     "latitude": 40.65803, "longitude": -73.84023, "residents": 10300, "minutes_saved": 7, "score": 69},
-]
+# Residential tracts beyond a 15-minute straight-line walk of any station.
+DESERT_KM = 1.2
+BOOLEAN = {"1": True, "true": True, "0": False, "false": False}
 
 
-def recommendations(goal="access", n=MAX_STATIONS):
-    if goal not in GOALS:
-        raise ValueError(f"goal must be one of {GOALS}")
-    n = int(n)
-    if not 1 <= n <= MAX_STATIONS:
-        raise ValueError(f"n must be between 1 and {MAX_STATIONS}")
-    if goal == "access":
-        key = lambda c: c["score"]
-    else:
-        key = lambda c: c["minutes_saved"] * c["residents"]
-    ranked = sorted(SAMPLE_CANDIDATES, key=key, reverse=True)[:n]
-    stations = [{**candidate, "rank": rank} for rank, candidate in enumerate(ranked, 1)]
-    return {"sample": True, "goal": goal, "stations": stations}
+def recommendations(goal="access", n=5, along="1", spacing=None, budget=None):
+    """Optimizer output for query-string parameters (all values may be strings)."""
+    if str(along).lower() not in BOOLEAN:
+        raise ValueError("along must be 1/0 or true/false")
+    try:
+        spacing = None if spacing in (None, "") else float(spacing)
+    except ValueError as exc:
+        raise ValueError("spacing must be a number of kilometers") from exc
+    return optimizer.optimize(goal, n, along_lines=BOOLEAN[str(along).lower()],
+                              min_spacing_km=spacing, budget=budget or None)
+
+
+def _data():
+    return optimizer.context().data
 
 
 @lru_cache(maxsize=1)
-def _data(data_dir=DEFAULT_DATA_DIR):
-    from .data_loader import load_data
+def existing_lines():
+    ctx = optimizer.context()
+    return network.lines_geojson(ctx.stations, ctx.lines)
 
-    return load_data(data_dir)
+
+@lru_cache(maxsize=1)
+def transit_deserts():
+    """Merged outline of residential tracts beyond DESERT_KM of every station."""
+    baseline = optimizer.context().baseline
+    far = baseline[(baseline.population > 0) & (baseline.nearest_station_distance_km > DESERT_KM)
+                   & (baseline.geometry_status == "valid")]
+    outline = shapely.union_all(list(far.geometry)).simplify(0.0002, preserve_topology=True)
+    return {"type": "FeatureCollection", "threshold_km": DESERT_KM,
+            "population": int(far.population.sum()), "tracts": len(far),
+            "features": [{"type": "Feature", "properties": {},
+                          "geometry": mapping(_rounded(outline))}]}
 
 
 @lru_cache(maxsize=1)

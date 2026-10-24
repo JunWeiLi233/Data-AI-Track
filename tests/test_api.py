@@ -4,20 +4,17 @@ from backend import api
 
 
 class RecommendationTests(unittest.TestCase):
-    def test_ranks_by_goal_and_limits_count(self):
-        access = api.recommendations("access", 3)["stations"]
-        self.assertEqual([s["rank"] for s in access], [1, 2, 3])
-        self.assertEqual([s["score"] for s in access], sorted((s["score"] for s in access), reverse=True))
-        eff = api.recommendations("eff", 5)["stations"]
-        impact = [s["minutes_saved"] * s["residents"] for s in eff]
-        self.assertEqual(impact, sorted(impact, reverse=True))
+    def test_query_strings_reach_the_optimizer(self):
+        result = api.recommendations("eff", "2", along="0", spacing="0.8", budget="High")
+        self.assertEqual(result["goal"], "eff")
+        self.assertLessEqual(len(result["stations"]), 2)
+        self.assertTrue(all(s["offline_km"] <= 3.0 for s in result["stations"]))
 
     def test_rejects_invalid_parameters(self):
-        with self.assertRaises(ValueError):
-            api.recommendations("speed", 3)
-        for n in (0, 6):
-            with self.assertRaises(ValueError):
-                api.recommendations("access", n)
+        for kwargs in ({"goal": "speed"}, {"n": "0"}, {"n": "11"}, {"along": "maybe"},
+                       {"spacing": "far"}, {"spacing": "-1"}, {"budget": "Huge"}):
+            with self.assertRaises(ValueError, msg=kwargs):
+                api.recommendations(**kwargs)
 
 
 class MapLayerTests(unittest.TestCase):
@@ -28,6 +25,14 @@ class MapLayerTests(unittest.TestCase):
         feature = next(f for f in tracts["features"] if f["properties"]["density"])
         self.assertIn(feature["geometry"]["type"], ("Polygon", "MultiPolygon"))
         self.assertGreater(feature["properties"]["density"], 0)
+
+    def test_lines_and_deserts_are_geojson(self):
+        lines = api.existing_lines()["features"]
+        self.assertGreater(len(lines), 30)
+        self.assertTrue(all(f["geometry"]["type"] == "MultiLineString" for f in lines))
+        deserts = api.transit_deserts()
+        self.assertGreater(deserts["population"], 0)
+        self.assertIn(deserts["features"][0]["geometry"]["type"], ("Polygon", "MultiPolygon"))
 
     def test_existing_stations_are_inside_nyc(self):
         for station in api.existing_stations()["stations"]:

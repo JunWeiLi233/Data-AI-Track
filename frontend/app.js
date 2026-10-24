@@ -67,19 +67,19 @@ class MapView {
     return DENSITY_COLORS[i < 0 ? DENSITY_COLORS.length - 1 : i];
   }
   async loadNetwork() {
-    const [overlays, existing] = await Promise.all([getJSON('assets/overlays.geojson'), getJSON('/api/stations')]);
-    L.geoJSON(overlays, {
+    const [lines, existing, deserts] = await Promise.all([getJSON('/api/lines'), getJSON('/api/stations'), getJSON('/api/deserts')]);
+    L.geoJSON(lines, {
       pane: 'overlays',
-      filter: (f) => f.properties.kind === 'line',
-      style: (f) => ({ color: f.properties.color, weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round' })
+      style: (f) => ({ color: f.properties.color, weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }),
+      onEachFeature: (f, layer) => layer.bindTooltip(f.properties.line + (f.properties.routes.length ? ' (' + f.properties.routes.join(', ') + ')' : ''), { sticky: true })
     }).addTo(this.layers.lines);
     existing.stations.forEach((st) => L.circleMarker([st.latitude, st.longitude], { pane: 'overlays', radius: 2.5, color: '#3A414B', weight: 1, fillColor: '#FFFFFF', fillOpacity: 1 })
       .bindTooltip(st.name).addTo(this.layers.lines));
-    L.geoJSON(overlays, {
+    L.geoJSON(deserts, {
       pane: 'overlays',
-      filter: (f) => f.properties.kind === 'desert',
       style: { color: '#C4363B', weight: 1.5, dashArray: '5 5', fillColor: '#E5484D', fillOpacity: 0.08 }
-    }).addTo(this.layers.deserts);
+    }).bindTooltip(deserts.tracts + ' residential tracts, ' + deserts.population.toLocaleString('en-US') + ' residents, beyond ' + deserts.threshold_km + ' km of a station', { sticky: true })
+      .addTo(this.layers.deserts);
   }
   sync(s) {
     if (!this.map) return;
@@ -92,7 +92,7 @@ class MapView {
         L.circle(at, { pane: 'overlays', radius: WALK_RADIUS_M, color: '#E5484D', opacity: 0.5, weight: 1, fillColor: '#E5484D', fillOpacity: 0.22 }).addTo(this.layers.walk);
         L.marker(at, { zIndexOffset: 1000, title: st.name, icon: L.divIcon({ className: 'rec-marker', iconSize: [24, 24],
           html: '<span style="width: 24px; height: 24px; border-radius: 50%; background: #E5484D; border: 2.5px solid #FFFFFF; box-sizing: border-box; color: #FFFFFF; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(18,22,28,0.3)">' + st.rank + '</span>' }) })
-          .bindTooltip(st.name).addTo(this.layers.stations);
+          .bindTooltip(st.rank + '. ' + st.name + ' — ' + st.near).addTo(this.layers.stations);
       });
     }
     const on = { density: s.l.density, lines: s.l.lines, deserts: s.l.deserts, walk: s.show && s.l.walk, stations: s.show && s.l.stations };
@@ -121,7 +121,7 @@ function thumbStyle(lat, lon) {
 class Component extends DCLogic {
 constructor(props) {
 super(props);
-this.state = Object.assign(this.initial(), { stations: [], sample: true, summary: null, summaryError: '', breaks: null });
+this.state = Object.assign(this.initial(), { stations: [], impact: null, summary: null, summaryError: '', breaks: null });
 this.request = 0;
 }
 initial() {
@@ -143,12 +143,20 @@ this.setState({ status: 'Could not load map layers: ' + e.message, statusError: 
 }
 }
 // Responses can arrive out of order when settings change quickly; keep only the latest.
-async loadRecommendations(status) {
+async loadRecommendations(announce) {
 const id = ++this.request;
-const { goal, n } = this.state;
+const { goal, n, c, spacingKm, budget } = this.state;
+const params = new URLSearchParams({ goal: goal, n: n, along: c.along ? '1' : '0' });
+if (c.spacing) params.set('spacing', spacingKm);
+if (c.budget) params.set('budget', budget);
+this.setState({ status: 'Optimizing…', statusError: false });
 try {
-const body = await getJSON('/api/recommendations?goal=' + goal + '&n=' + n);
-if (id === this.request) this.setState({ stations: body.stations, sample: body.sample, status: status || '', statusError: false });
+const body = await getJSON('/api/recommendations?' + params);
+if (id !== this.request) return;
+const placed = body.stations.length;
+const status = placed < n ? 'Only ' + placed + ' of ' + n + ' stations fit the current constraints.'
+: announce ? 'Placed ' + placed + (placed === 1 ? ' station' : ' stations') + ' for the current goal and constraints.' : '';
+this.setState({ stations: body.stations, impact: body.impact, status: status, statusError: false });
 } catch (e) {
 if (id === this.request) this.setState({ status: 'Could not load recommendations: ' + e.message, statusError: true });
 }
@@ -159,16 +167,18 @@ const s = this.state;
 const shown = s.stations;
 const fmt = (v) => v.toLocaleString('en-US');
 const list = shown.map((st) => ({
-rank: st.rank, name: st.name, near: st.near, residents: '+' + fmt(st.residents), mins: '−' + st.minutes_saved + ' min', score: st.score + '/100',
+rank: st.rank, name: st.name, near: st.near, borough: st.borough + (st.on_existing_line ? ' · infill on existing track' : ' · needs ' + st.offline_km + ' km of new track'),
+residents: '+' + fmt(st.residents), mins: '−' + st.minutes_saved + ' min', score: st.score + '/100',
 thumbStyle: thumbStyle(st.latitude, st.longitude)
 }));
-const added = shown.reduce((t, st) => t + st.residents, 0);
+const im = s.impact;
+const compact = (v) => v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : fmt(v);
 const seg = (on) => 'height: 40px; border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; ' + (on ? 'background: #2457D6; color: #FFFFFF' : 'background: #FFFFFF; color: #12161C');
 const flip = (group, key) => () => this.setState({ [group]: Object.assign({}, this.state[group], { [key]: !this.state[group][key] }) });
 const sum = s.summary;
 return {
 n: s.n, count: shown.length,
-badge: s.sample ? 'Sample data' : 'Modeled results',
+badge: 'Modeled results',
 accessPressed: String(s.goal === 'access'), effPressed: String(s.goal === 'eff'),
 accessStyle: seg(s.goal === 'access'), effStyle: seg(s.goal === 'eff'),
 goalText: s.goal === 'access' ? 'Prioritize serving more residents within a 10-minute walk of a subway station.' : 'Prioritize the biggest cuts in door-to-door travel time across the network.',
@@ -182,7 +192,7 @@ spacingKm: s.spacingKm, setSpacing: (e) => this.setState({ spacingKm: Number(e.t
 budgetIs: { [s.budget]: true }, setBudget: (e) => this.setState({ budget: e.target.value }),
 toggleAlong: flip('c', 'along'), toggleSpacing: flip('c', 'spacing'), toggleBudget: flip('c', 'budget'),
 tDensity: flip('l', 'density'), tLines: flip('l', 'lines'), tStations: flip('l', 'stations'), tWalk: flip('l', 'walk'), tDeserts: flip('l', 'deserts'),
-run: () => this.loadRecommendations(s.sample ? 'Sample results shown; constraints are not applied until the scoring model is implemented.' : 'Results updated for the current goal and settings.'),
+run: () => this.loadRecommendations(true),
 reset: () => this.update(this.initial()),
 status: s.status, statusColor: s.statusError ? '#C4363B' : '#127A3E',
 densityLow: s.breaks ? '< ' + fmt(s.breaks[0]) : 'Lower', densityHigh: s.breaks ? '≥ ' + fmt(s.breaks[s.breaks.length - 1]) : 'Higher',
@@ -190,7 +200,15 @@ zoomIn: () => mapView.zoom(1),
 zoomOut: () => mapView.zoom(-1),
 list: list, showList: s.show, hideList: !s.show,
 countLabel: s.show ? shown.length + (shown.length === 1 ? ' location' : ' locations') : 'Hidden',
-added: fmt(added),
+added: im ? fmt(im.residents_added) : '…',
+coveragePct: im ? im.coverage_after_pct : 0, coverageDash: im ? (314 * im.coverage_after_pct / 100).toFixed(0) : 0,
+coveredAfter: im ? compact(im.covered_after) : '…',
+walkBefore: im ? im.walk_minutes_before : '…', walkAfter: im ? im.walk_minutes_after : '…',
+walkSaved: im ? (im.walk_minutes_before - im.walk_minutes_after).toFixed(1) : '…',
+walkDropPct: im ? (100 * (1 - im.walk_minutes_after / im.walk_minutes_before)).toFixed(1) : '…',
+walkBarAfter: im ? Math.round(90 * im.walk_minutes_after / im.walk_minutes_before) : 90,
+onLineLabel: im ? im.on_existing_lines + ' of ' + shown.length + ' on existing track' : '…',
+boroughLabel: im && im.boroughs.length ? 'in ' + im.boroughs.join(', ') : '',
 dataSummary: sum
 ? 'Source data: ' + fmt(sum.physical_station_locations) + ' subway station locations, ' + fmt(sum.entrances) + ' entrances, and ' + fmt(sum.tracts) + ' census tracts covering ' + fmt(sum.population) + ' residents (' + fmt(sum.tracts_missing_population) + ' tracts without population estimates).'
 : s.summaryError ? 'Source data summary unavailable (' + s.summaryError + ').' : 'Loading source data summary…'
