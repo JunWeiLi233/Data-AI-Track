@@ -25,7 +25,7 @@ from .scoring import score_tracts
 from .simulator import simulate_expansion
 
 GOALS = ("access", "eff")
-MAX_STATIONS = 10
+MAX_STATIONS = 100
 WALK_KM = 0.8
 WALK_KM_PER_MIN = 0.08
 DEFAULT_SPACING_KM = 0.5

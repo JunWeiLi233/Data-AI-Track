@@ -40,7 +40,7 @@ endpoints built in `backend/api.py`; data is loaded once per process:
 - `/api/lines`: existing lines from `backend/network.py` (below).
 - `/api/deserts`: merged outline of residential tracts more than 1.2 km
   (a 15-minute walk) from every station in the baseline scoring.
-- `/api/recommendations?goal=access|eff&n=1..10&along=1|0&spacing=km&budget=Low|Medium|High`:
+- `/api/recommendations?goal=access|eff&n=1..100&along=1|0&spacing=km&budget=Low|Medium|High`:
   `backend/optimizer.py` output (below).
 
 The map is Leaflet 1.9.4 (npm) on OpenStreetMap tiles. OSM's volunteer

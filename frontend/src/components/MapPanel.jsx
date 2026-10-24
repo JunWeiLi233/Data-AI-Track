@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import { fmt, getJSON } from '../lib/api.js';
+import { COST_NOTE, PER_KM_LABEL, costTier, dollarRange, showCostSources } from '../lib/cost.js';
 import { MinusIcon, PlusIcon } from './icons.jsx';
 
 // OpenStreetMap's volunteer tile servers are fine for development; use a tile
@@ -40,6 +41,75 @@ function addNetwork(lines, existing, deserts, layers) {
     .addTo(layers.deserts);
 }
 
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function Detail({ value, label, note }) {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <strong className="text-[15px]">{value}</strong>
+      <span className="text-[11px] leading-tight text-muted">{label}</span>
+      {note && <span className="text-[11px] leading-tight text-muted/80">{note}</span>}
+    </div>
+  );
+}
+
+// Station details from the optimizer response (backend/optimizer.py). Straight-line
+// distances from tract centers, 80 m per minute, 10-min walk = 800 m.
+const COST_STYLE = { Low: 'bg-good/10 text-good', Medium: 'bg-badge-soft text-badge', High: 'bg-rec/10 text-error', 'Above High': 'bg-rec/15 text-error' };
+
+function StationDetails({ st, onClose }) {
+  const cost = costTier(st);
+  const track = st.on_existing_line
+    ? 'Infill stop on existing track (' + st.line + (st.routes.length ? ': ' + st.routes.join(', ') : '') + ')'
+    : null; // off-network: `near` already gives the new-track distance and line
+  return (
+    <div role="dialog" aria-label={'Details for recommended station ' + st.rank} className="absolute bottom-3.5 left-3.5 z-[1002] flex max-h-[calc(100%-28px)] w-[300px] max-w-[calc(100%-90px)] flex-col gap-2.5 overflow-y-auto rounded-xl bg-white px-4 py-3.5 shadow-[0_4px_16px_rgba(18,22,28,0.18)]">
+      <div className="flex items-start gap-2.5">
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-rec text-xs font-bold text-white">{st.rank}</span>
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <strong className="leading-snug">{st.name}</strong>
+          <span className="text-xs text-muted">{st.borough} · Recommended station #{st.rank}</span>
+        </div>
+        <button type="button" aria-label="Close details" onClick={onClose} className="-mt-1 -mr-1 cursor-pointer rounded-md border-0 bg-transparent px-1.5 text-lg leading-none text-muted hover:bg-page hover:text-ink">×</button>
+      </div>
+      <div className="flex flex-col gap-1 text-xs leading-snug">
+        <span>{st.near}</span>
+        {track && <span className="text-muted">{track}</span>}
+      </div>
+      <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 border-t border-divider pt-2.5">
+        <Detail value={'+' + fmt(st.residents)} label="Residents newly within a 10-min walk" />
+        <Detail value={fmt(st.residents_benefiting)} label="Residents with a shorter walk" />
+        <Detail value={'−' + st.minutes_saved + ' min'} label="Avg. walk saved" note="for residents with a shorter walk" />
+        <Detail value={st.score + '/100'} label="Need score" note="avg. tract priority of those residents" />
+      </div>
+      <div className="flex flex-col gap-1.5 border-t border-divider pt-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold">Relative cost</span>
+          <span className={'rounded-full px-2 py-0.5 text-[11px] font-semibold ' + COST_STYLE[cost.level]}>{cost.level}</span>
+        </div>
+        <span className="text-xs leading-snug">{cost.text}</span>
+        {dollarRange(cost.km)
+          ? <span className="text-xs leading-snug">Illustrative construction cost: <strong>{dollarRange(cost.km)}</strong> ({cost.km} km × {PER_KM_LABEL}, from Second Avenue Subway costs)</span>
+          : <span className="text-xs leading-snug">Published per-km tunnel costs don’t apply to an infill stop, and the cited sources give no cost for adding a station to existing track.</span>}
+        <span className="text-[11px] leading-snug text-muted">{COST_NOTE} <a href="#cost-sources" onClick={showCostSources}>Sources</a></span>
+      </div>
+      <span className="text-[11px] leading-snug text-muted">Need score weights distance to a station 50%, population 30%, lower income 20%. Modeled estimates, not ridership forecasts.</span>
+    </div>
+  );
+}
+
+// Hover summary: the headline numbers, with the full breakdown one click away.
+function stationSummary(st) {
+  return '<div class="flex w-[230px] flex-col gap-1.5 whitespace-normal font-sans">'
+    + '<strong class="text-sm leading-snug text-ink">' + esc(st.rank) + '. ' + esc(st.name) + '</strong>'
+    + '<span class="text-xs leading-snug text-muted">' + esc(st.near) + '</span>'
+    + '<span class="text-xs text-ink"><strong>+' + esc(fmt(st.residents)) + '</strong> residents newly within a 10-min walk</span>'
+    + '<span class="text-xs text-ink"><strong>−' + esc(st.minutes_saved) + ' min</strong> avg. walk saved · need score <strong>' + esc(st.score) + '/100</strong></span>'
+    + '<span class="text-xs text-ink">Relative cost: <strong>' + esc(costTier(st).level) + '</strong> · ' + esc(costTier(st).km ? costTier(st).km + ' km of new track (≈ ' + dollarRange(costTier(st).km) + ' illustrative)' : 'no new track') + '</span>'
+    + '<span class="text-[11px] font-semibold text-accent">Click the marker for full details</span>'
+    + '</div>';
+}
+
 function Legend({ breaks }) {
   return (
     <div className="absolute top-3.5 left-3.5 z-[1000] flex w-[220px] flex-col gap-2.5 rounded-xl bg-white px-4 py-3.5 shadow-[0_2px_10px_rgba(18,22,28,0.10)]">
@@ -65,10 +135,12 @@ function Legend({ breaks }) {
   );
 }
 
-export default function MapPanel({ stations, show, layers: visible, onError }) {
+export default function MapPanel({ stations, show, layers: visible, focus, onError }) {
   const el = useRef(null);
   const ref = useRef(null); // { map, layers, touched }
   const [breaks, setBreaks] = useState(null);
+  const [legendOpen, setLegendOpen] = useState(true);
+  const [selected, setSelected] = useState(null);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
 
@@ -117,12 +189,13 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
 
   useEffect(() => {
     const { layers } = ref.current;
+    setSelected(null);
     layers.walk.clearLayers();
     layers.stations.clearLayers();
     stations.forEach((st) => {
       const at = [st.latitude, st.longitude];
       L.circle(at, { pane: 'overlays', radius: WALK_RADIUS_M, color: '#E5484D', opacity: 0.5, weight: 1, fillColor: '#E5484D', fillOpacity: 0.22 }).addTo(layers.walk);
-      L.marker(at, {
+      const marker = L.marker(at, {
         zIndexOffset: 1000,
         title: st.name,
         icon: L.divIcon({
@@ -130,7 +203,17 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
           iconSize: [24, 24],
           html: '<span style="width: 24px; height: 24px; border-radius: 50%; background: #E5484D; border: 2.5px solid #FFFFFF; box-sizing: border-box; color: #FFFFFF; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(18,22,28,0.3)">' + st.rank + '</span>',
         }),
-      }).bindTooltip(st.rank + '. ' + st.name + ' — ' + st.near).addTo(layers.stations);
+      });
+      // Hover shows a summary (below the marker when it sits near the top edge);
+      // a click opens the full details card in the corner of the map.
+      marker.bindTooltip(stationSummary(st), { direction: 'top', offset: [0, -14], opacity: 1, className: 'station-tip' })
+        .on('mouseover', () => {
+          const below = ref.current.map.latLngToContainerPoint(at).y < 190;
+          Object.assign(marker.getTooltip().options, below ? { direction: 'bottom', offset: [0, 14] } : { direction: 'top', offset: [0, -14] });
+          marker.getTooltip().update();
+        })
+        .on('click', () => { marker.closeTooltip(); setSelected(st); })
+        .addTo(layers.stations);
     });
   }, [stations]);
 
@@ -143,6 +226,16 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
     });
   }, [show, visible]);
 
+  // Fly to a station chosen from search or the recommendation list.
+  useEffect(() => {
+    if (!focus) return;
+    const state = ref.current;
+    state.touched = true;
+    state.map.flyTo([focus.lat, focus.lon], 15, { duration: 0.8 });
+    const pin = L.popup({ closeButton: false, offset: [0, -4] }).setLatLng([focus.lat, focus.lon]).setContent('<strong>' + focus.label.replace(/</g, '&lt;') + '</strong>').openOn(state.map);
+    return () => pin.remove();
+  }, [focus]);
+
   const zoom = (delta) => {
     const state = ref.current;
     state.touched = true;
@@ -151,10 +244,19 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
 
   const zoomButton = 'flex size-11 cursor-pointer items-center justify-center bg-white hover:bg-page';
   return (
-    <section aria-label="Map" className="relative min-h-[560px] min-w-0 flex-[999_1_520px] overflow-hidden rounded-[14px] border border-line bg-water">
+    <section aria-label="Map" className="relative h-[calc(100vh-var(--header-h,73px)-32px)] min-h-[480px] min-w-0 flex-1 overflow-hidden rounded-[14px] border border-line bg-water">
       <div ref={el} className="absolute inset-0 z-0" />
-      <Legend breaks={breaks} />
-      <div className="absolute right-3.5 bottom-[30px] z-[1000] flex flex-col overflow-hidden rounded-[10px] bg-white shadow-[0_2px_10px_rgba(18,22,28,0.10)]">
+      {legendOpen && <Legend breaks={breaks} />}
+      {selected && show && <StationDetails st={selected} onClose={() => setSelected(null)} />}
+      <button
+        type="button"
+        aria-expanded={legendOpen}
+        onClick={() => setLegendOpen((o) => !o)}
+        className={'absolute z-[1001] cursor-pointer rounded-lg border-0 bg-white px-2.5 py-1.5 text-xs font-semibold text-ink shadow-[0_2px_10px_rgba(18,22,28,0.10)] hover:bg-page ' + (legendOpen ? 'top-3.5 left-[246px]' : 'top-3.5 left-3.5')}
+      >
+        {legendOpen ? 'Hide legend' : 'Show legend'}
+      </button>
+      <div className="absolute top-3.5 right-3.5 z-[1000] flex flex-col overflow-hidden rounded-[10px] bg-white shadow-[0_2px_10px_rgba(18,22,28,0.10)]">
         <button type="button" aria-label="Zoom in" onClick={() => zoom(1)} className={zoomButton}><PlusIcon /></button>
         <button type="button" aria-label="Zoom out" onClick={() => zoom(-1)} className={zoomButton + ' border-t border-divider'}><MinusIcon /></button>
       </div>
