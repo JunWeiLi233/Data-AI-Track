@@ -11,14 +11,6 @@ export function TrainIcon({ size = 24, color = '#FFFFFF', wheels = true }) {
   );
 }
 
-export function SearchIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" stroke="#5B6472" strokeWidth="2" {...stroke}>
-      <circle cx="11" cy="11" r="7" /><path d="M20 20 L16 16" />
-    </svg>
-  );
-}
-
 export function PlayIcon() {
   return <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" fill="#FFFFFF"><path d="M6 4 L20 12 L6 20 Z" /></svg>;
 }

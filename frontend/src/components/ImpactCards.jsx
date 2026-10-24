@@ -1,4 +1,5 @@
 import { compact, fmt } from '../lib/api.js';
+import { COST_NOTE, PER_KM_LABEL, dollarRange, showCostSources, totalNewTrackKm } from '../lib/cost.js';
 import { BarsIcon, ClockIcon, PeopleIcon, TrainIcon } from './icons.jsx';
 
 function Card({ title, children, className = 'gap-3.5' }) {
@@ -22,7 +23,9 @@ function Improvement({ icon, value, label }) {
   );
 }
 
-export default function ImpactCards({ impact: im, count }) {
+export default function ImpactCards({ impact: im, stations }) {
+  const count = stations.length;
+  const newTrackKm = totalNewTrackKm(stations);
   const pending = '…';
   const added = im ? fmt(im.residents_added) : pending;
   const coveragePct = im ? im.coverage_after_pct : 0;
@@ -31,7 +34,13 @@ export default function ImpactCards({ impact: im, count }) {
   const ratio = im ? im.walk_minutes_after / im.walk_minutes_before : 1;
 
   return (
-    <div id="impact" className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-4">
+    <div id="impact" className="flex scroll-mt-24 flex-col gap-4">
+      <p className="m-0 rounded-[14px] border border-line bg-white px-5 py-4 text-base leading-normal">
+        {im
+          ? <>Adding <strong>{count} {count === 1 ? 'station' : 'stations'}</strong> would bring <strong className="text-good">{added} more residents</strong> within a 10-minute walk{walkBefore - walkAfter >= 0.05 ? <> and cut the average walk to a station by <strong>{(walkBefore - walkAfter).toFixed(1)} min</strong></> : null}.</>
+          : 'Calculating impact…'}
+      </p>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-4">
       <Card title="Population coverage">
         <div className="flex items-center gap-5">
           <svg width="120" height="120" viewBox="0 0 120 120" role="img" aria-label={coveragePct + ' percent of residents within a 10-minute walk'}>
@@ -75,8 +84,16 @@ export default function ImpactCards({ impact: im, count }) {
           <span className="flex size-[72px] items-center justify-center rounded-full bg-[#EEF1F5]"><TrainIcon size={34} color="#12161C" wheels={false} /></span>
           <div className="flex flex-col gap-1">
             <strong className="text-[34px]">{count}</strong>
-            <a href="#recommendations" className="no-underline">recommended locations →</a>
+            <a href="#explore" className="no-underline">recommended locations on the map →</a>
           </div>
+        </div>
+        <div className="flex flex-col gap-1 border-t border-divider pt-3" title={COST_NOTE}>
+          <span className="font-semibold">{newTrackKm ? newTrackKm + ' km of new track needed' : 'No new track needed'}</span>
+          <span className="text-xs leading-normal text-muted">
+            {(im ? im.on_existing_lines : '…') + ' of ' + count + ' are infill stops on existing track (lowest relative cost).'}
+            {newTrackKm ? ' Illustrative new-track cost: ' + dollarRange(newTrackKm) + ' (' + PER_KM_LABEL + ').' : ''}
+            {' '}<a href="#cost-sources" onClick={showCostSources}>Cost sources</a>
+          </span>
         </div>
       </Card>
 
@@ -89,6 +106,7 @@ export default function ImpactCards({ impact: im, count }) {
           label={im && im.boroughs.length ? 'in ' + im.boroughs.join(', ') : ''}
         />
       </Card>
+      </div>
     </div>
   );
 }

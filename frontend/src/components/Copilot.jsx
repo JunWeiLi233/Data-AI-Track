@@ -62,7 +62,29 @@ function Message({ m }) {
   );
 }
 
+// A generic snowflake mark in Snowflake's brand blue; swap in the official logo asset if needed.
+function SnowflakeMark({ size = 28 }) {
+  const arm = 'M0 -10 V10 M-3.2 -7 L0 -4.2 L3.2 -7 M-3.2 7 L0 4.2 L3.2 7';
+  return (
+    <svg width={size} height={size} viewBox="-12 -12 24 24" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      {[0, 60, 120].map((r) => <path key={r} d={arm} transform={'rotate(' + r + ')'} />)}
+    </svg>
+  );
+}
+
+export const OPEN_COPILOT = 'open-copilot';
+
 export default function Copilot({ recommendations }) {
+  const [open, setOpen] = useState(false);
+  const input = useRef(null);
+
+  useEffect(() => {
+    const show = () => setOpen(true);
+    window.addEventListener(OPEN_COPILOT, show);
+    return () => window.removeEventListener(OPEN_COPILOT, show);
+  }, []);
+  useEffect(() => { if (open && input.current) input.current.focus(); }, [open]);
+
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState('');
   const [pending, setPending] = useState(false);
@@ -94,13 +116,29 @@ export default function Copilot({ recommendations }) {
     }
   };
 
+  // Collapsed to a floating Snowflake button; the chat opens as a panel when clicked.
+  // The panel stays mounted while hidden so the conversation survives closing it.
   return (
-    <section id="copilot" aria-label="Planning copilot" className="flex flex-col gap-3.5 rounded-[14px] border border-line bg-white p-5">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1.5 border-b border-divider pb-2.5">
-        <h2 className="m-0 text-lg font-bold">Ask the planning copilot</h2>
-        <span className="text-xs text-muted">Snowflake analytics + AI_COMPLETE ({model}) over the planning tables</span>
+    <>
+      <button
+        type="button"
+        aria-label={open ? 'Close the planning copilot' : 'Ask the planning copilot (Snowflake)'}
+        aria-expanded={open}
+        title="Ask the planning copilot"
+        onClick={() => setOpen((o) => !o)}
+        className="fixed right-4 bottom-4 z-[3300] flex size-14 cursor-pointer items-center justify-center rounded-full border-0 bg-white text-[#29B5E8] shadow-[0_4px_16px_rgba(18,22,28,0.22)] hover:bg-page"
+      >
+        {open ? <span className="text-2xl leading-none text-muted">×</span> : <SnowflakeMark />}
+      </button>
+    <section id="copilot" aria-label="Planning copilot" hidden={!open} className="fixed right-4 bottom-[88px] z-[3300] flex max-h-[calc(100vh-120px)] w-[440px] max-w-[calc(100vw-32px)] flex-col gap-3.5 rounded-[14px] border border-line bg-white p-5 shadow-[0_8px_30px_rgba(18,22,28,0.22)]">
+      <div className="flex items-start gap-3 border-b border-divider pb-2.5">
+        <span className="text-[#29B5E8]"><SnowflakeMark size={22} /></span>
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <h2 className="m-0 text-lg font-bold">Ask the planning copilot</h2>
+          <span className="text-xs text-muted">Snowflake analytics + AI_COMPLETE ({model}) over the planning tables</span>
+        </div>
       </div>
-      <div ref={log} role="log" aria-live="polite" className="flex max-h-[460px] flex-col gap-3 overflow-y-auto">
+      <div ref={log} role="log" aria-live="polite" className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
         {messages.length === 0 && (
           <p className="m-0 leading-normal text-muted">
             Ask about transit deserts, neighborhoods, stations or the recommendations on the map. Answers are grounded in Snowflake tables and list what they used.
@@ -119,7 +157,7 @@ export default function Copilot({ recommendations }) {
       </div>
       <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); ask(draft); }}>
         <input
-          type="text" value={draft} onChange={(e) => setDraft(e.target.value)} maxLength={1000} autoComplete="off"
+          ref={input} type="text" value={draft} onChange={(e) => setDraft(e.target.value)} maxLength={1000} autoComplete="off"
           aria-label="Ask the planning copilot" placeholder="e.g. Which Bronx neighborhoods have the highest need scores?"
           className="h-11 min-w-0 flex-1 rounded-[10px] border border-field px-3.5"
         />
@@ -129,5 +167,6 @@ export default function Copilot({ recommendations }) {
         </button>
       </form>
     </section>
+    </>
   );
 }
