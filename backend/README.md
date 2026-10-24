@@ -417,6 +417,13 @@ riding it to distant jobs; being far often means driving.
 python -m backend.planning_model   # checks, coefficients, data/gold/planning_predictions.csv
 ```
 
+The server returns the same predictions at `/api/planning-model` for every
+tract with features (labeled or not), with plain-language reasons and the
+validation numbers. The map shows them as the "Underserved risk (model)" layer;
+hovering a tract gives its chance, 90% range, main reason and the Census share
+of 60+ minute commutes. The model is fit on the first request (about 3 seconds)
+and then cached.
+
 The predictions file has, per tract, the probability, its 90% interval, an
 out-of-fold probability (made without the tract's community district), each
 feature's contribution, and `main_reason`, the tract feature that raises the

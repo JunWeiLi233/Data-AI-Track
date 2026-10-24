@@ -11,7 +11,7 @@ const initialSettings = () => ({
   goal: 'access', show: true, n: 5,
   spacingKm: 1.0, budget: 'Medium',
   c: { along: true, spacing: false, budget: false },
-  l: { density: true, lines: true, stations: true, walk: true, deserts: false },
+  l: { density: true, risk: false, lines: true, stations: true, walk: true, deserts: false },
 });
 
 function DataNote({ summary, error }) {

@@ -84,20 +84,27 @@ def feature_matrix(frame, feature_set=DEFAULT_FEATURE_SET):
     return np.column_stack(columns)
 
 
-def training_frame(data=None, gold=None, flows=None):
-    """Clustered tracts with travel and job features, joined to gold labels.
-
-    Keeps only rows usable by every method.
-    """
+def feature_frame(data=None, gold=None, flows=None):
+    """Every tract with clustering, travel and job features, left-joined to gold labels."""
     data = load_data() if data is None else data
     gold = build_gold_labels() if gold is None else gold
     clustered = cluster_tracts(score_tracts(data))
     clustered["transit_minutes_to_jobs"] = transit_minutes_to_jobs(clustered, data)
     clustered = clustered.join(job_destination_features(clustered, data, flows))
-    frame = clustered.merge(gold, on="GEOID", how="left", validate="one_to_one")
-    usable = (frame.cluster.notna() & frame.underserved.notna() & frame.priority_score.notna()
-              & frame.CDTA2020.notna() & frame.transit_minutes_to_jobs.gt(0)
-              & frame.job_minutes_mean.gt(0) & frame[list(JOB_DESTINATION_FEATURES)].notna().all(axis=1))
+    return clustered.merge(gold, on="GEOID", how="left", validate="one_to_one")
+
+
+def has_features(frame):
+    """Rows with every feature any method uses, labeled or not."""
+    return (frame.cluster.notna() & frame.priority_score.notna() & frame.CDTA2020.notna()
+            & frame.transit_minutes_to_jobs.gt(0) & frame.job_minutes_mean.gt(0)
+            & frame[list(JOB_DESTINATION_FEATURES)].notna().all(axis=1))
+
+
+def training_frame(data=None, gold=None, flows=None, frame=None):
+    """feature_frame rows with a gold label and every feature; pass frame to reuse one."""
+    frame = feature_frame(data, gold, flows) if frame is None else frame
+    usable = has_features(frame) & frame.underserved.notna()
     return frame[usable].sort_values("GEOID").reset_index(drop=True)
 
 

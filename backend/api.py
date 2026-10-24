@@ -7,12 +7,19 @@ from pyproj import Transformer
 from shapely.geometry import mapping
 from shapely.ops import transform
 
-from . import clustering, network, optimizer
+from . import clustering, network, optimizer, planning_model, supervised
 
 SQUARE_FEET_TO_KM2 = (1200 / 3937) ** 2 / 1e6  # US survey feet
 # Residential tracts beyond a 15-minute straight-line walk of any station.
 DESERT_KM = 1.2
 BOOLEAN = {"1": True, "true": True, "0": False, "false": False}
+# Plain-language reasons for planning_model.main_reason; each says why the
+# feature raises a tract's chance of being underserved.
+PLANNING_REASONS = {
+    "job_share_over_45": "Many residents' jobs are 45+ minutes away by subway",
+    "log_station_distance": "Close to a station, so residents ride to distant jobs rather than drive",
+    "log_density": "Dense neighborhood, with fewer car commuters",
+}
 
 
 def recommendations(goal="access", n=5, along="1", spacing=None, budget=None):
@@ -132,3 +139,50 @@ def tract_density():
         })
     breaks = [round(float(q)) for q in pd.Series(densities).quantile([0.25, 0.5, 0.75])]
     return {"type": "FeatureCollection", "breaks": breaks, "features": features}
+
+
+def _round(value, digits=3):
+    return None if pd.isna(value) else round(float(value), digits)
+
+
+@lru_cache(maxsize=1)
+def planning_predictions():
+    """Planning model fit on labeled tracts, with a prediction for every tract that has features.
+
+    tracts maps GEOID to probability, its 90% interval, the main reason key (None
+    when no feature raises the score above an average tract) and, where labeled,
+    the observed share of 60+ minute commutes and the gold label.
+    """
+    frame = supervised.feature_frame(_data())
+    labeled = supervised.training_frame(frame=frame)
+    checks = planning_model.validate(labeled)
+    model, coefficients, boot = planning_model.train_planning_model(labeled)
+    usable = frame[supervised.has_features(frame)]
+    predictions = planning_model.predict(model, boot, usable)
+    own = predictions[[f"contribution_{f}" for f in planning_model.FEATURES[:planning_model.TRACT_FEATURES]]]
+    raises = own.max(axis=1) > 0
+    tracts = {}
+    for geoid, row, reason, share, label in zip(
+            predictions.GEOID, predictions.itertuples(), predictions.main_reason.where(raises),
+            usable.long_commute_share, usable.underserved):
+        tracts[geoid] = {
+            "probability": _round(row.probability), "low": _round(row.low_90), "high": _round(row.high_90),
+            "reason": None if pd.isna(reason) else reason,
+            "observed_long_commute_share": _round(share), "underserved": None if pd.isna(label) else int(label),
+        }
+    by_borough = checks["by_borough"]
+    return {
+        "model": {
+            "features": list(planning_model.FEATURES),
+            "labeled_tracts": len(labeled),
+            "roc_auc": _round(checks["roc_auc"]), "roc_auc_confident": _round(checks["roc_auc_confident"]),
+            "brier": _round(checks["brier"], 4), "brier_prevalence_only": _round(checks["brier_prevalence_only"], 4),
+            "coefficients": [{"feature": name, "coefficient": _round(row.coefficient),
+                              "low_95": _round(row.low_95), "high_95": _round(row.high_95)}
+                             for name, row in coefficients.iterrows()],
+            "boroughs": [{"borough": name, "predicted": _round(row.predicted), "observed": _round(row.observed),
+                          "roc_auc_within": _round(row.roc_auc_within)} for name, row in by_borough.iterrows()],
+        },
+        "reasons": PLANNING_REASONS,
+        "tracts": tracts,
+    }

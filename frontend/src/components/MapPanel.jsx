@@ -10,6 +10,10 @@ const ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">Op
 const NYC_BOUNDS = [[40.49, -74.26], [40.92, -73.70]];
 const DENSITY_COLORS = ['#E4E0F7', '#C4BEEC', '#9B91DD', '#6E62C8'];
 const WALK_RADIUS_M = 800;
+// Planning-model chance that a tract is underserved (long commutes), in five bands.
+const RISK_BREAKS = [0.1, 0.25, 0.4, 0.55];
+const RISK_COLORS = ['#FCEBDD', '#F7C6A0', '#EE9562', '#D9602F', '#A93A17'];
+const pct = (v) => Math.round(v * 100) + '%';
 
 function densityColor(breaks, d) {
   const i = breaks.findIndex((b) => d < b);
@@ -25,35 +29,90 @@ function addTracts(tracts, group) {
   }).addTo(group);
 }
 
+// Every vector layer shares one canvas: a second canvas on top would swallow
+// the mouse events that drive tract tooltips. Tract shading is kept underneath.
+function toBack(group) {
+  group.eachLayer((layer) => layer.bringToBack());
+}
+
+function riskColor(p) {
+  const i = RISK_BREAKS.findIndex((b) => p < b);
+  return RISK_COLORS[i < 0 ? RISK_COLORS.length - 1 : i];
+}
+
+function riskTooltip(geoid, t, reasons) {
+  if (!t) return 'Tract ' + geoid + ': no prediction (no residents, income or job data)';
+  const lines = [
+    '<strong>Tract ' + geoid + '</strong>',
+    pct(t.probability) + ' chance underserved (90% range ' + pct(t.low) + '–' + pct(t.high) + ')',
+    t.reason ? 'Main reason: ' + reasons[t.reason] : 'No factor raises it above an average tract',
+  ];
+  if (t.observed_long_commute_share != null) {
+    lines.push('Census: ' + pct(t.observed_long_commute_share) + ' of workers commute 60+ min');
+  }
+  return lines.join('<br>');
+}
+
+function addRisk(tracts, planning, group) {
+  L.geoJSON(tracts, {
+    style: (f) => {
+      const t = planning.tracts[f.properties.geoid];
+      return { color: '#FFFFFF', weight: 0.3, fillOpacity: t ? 0.75 : 0, fillColor: t ? riskColor(t.probability) : '#FFFFFF' };
+    },
+    onEachFeature: (f, layer) => layer.bindTooltip(riskTooltip(f.properties.geoid, planning.tracts[f.properties.geoid], planning.reasons), { sticky: true }),
+  }).addTo(group);
+}
+
 function addNetwork(lines, existing, deserts, layers) {
   L.geoJSON(lines, {
-    pane: 'overlays',
     style: (f) => ({ color: f.properties.color, weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }),
     onEachFeature: (f, layer) => layer.bindTooltip(f.properties.line + (f.properties.routes.length ? ' (' + f.properties.routes.join(', ') + ')' : ''), { sticky: true }),
   }).addTo(layers.lines);
-  existing.stations.forEach((st) => L.circleMarker([st.latitude, st.longitude], { pane: 'overlays', radius: 2.5, color: '#3A414B', weight: 1, fillColor: '#FFFFFF', fillOpacity: 1 })
+  existing.stations.forEach((st) => L.circleMarker([st.latitude, st.longitude], { radius: 2.5, color: '#3A414B', weight: 1, fillColor: '#FFFFFF', fillOpacity: 1 })
     .bindTooltip(st.name).addTo(layers.lines));
   L.geoJSON(deserts, {
-    pane: 'overlays',
     style: { color: '#C4363B', weight: 1.5, dashArray: '5 5', fillColor: '#E5484D', fillOpacity: 0.08 },
   }).bindTooltip(deserts.tracts + ' residential tracts, ' + fmt(deserts.population) + ' residents, beyond ' + deserts.threshold_km + ' km of a station', { sticky: true })
     .addTo(layers.deserts);
 }
 
-function Legend({ breaks }) {
+function RiskScale({ planning }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="font-semibold">Underserved risk</span>
+      <span className="text-xs text-muted">Chance a tract&apos;s workers have long (60+ min) commutes, from the planning model</span>
+      <div className="grid h-2.5 grid-cols-5 overflow-hidden rounded-[3px]">
+        {RISK_COLORS.map((c) => <span key={c} style={{ background: c }} />)}
+      </div>
+      <div className="flex justify-between text-xs text-muted">
+        <span>{'< ' + pct(RISK_BREAKS[0])}</span>
+        <span>{'≥ ' + pct(RISK_BREAKS[RISK_BREAKS.length - 1])}</span>
+      </div>
+      <span className="text-xs text-muted">
+        {planning.status === 'ready'
+          ? 'Ranks tracts with ROC AUC ' + planning.model.roc_auc + ' on held-out districts. Hover a tract for its 90% range and main reason.'
+          : planning.status === 'error' ? 'Could not load the model.' : 'Loading model…'}
+      </span>
+    </div>
+  );
+}
+
+function Legend({ breaks, risk, planning }) {
   return (
     <div className="absolute top-3.5 left-3.5 z-[1000] flex w-[220px] flex-col gap-2.5 rounded-xl bg-white px-4 py-3.5 shadow-[0_2px_10px_rgba(18,22,28,0.10)]">
-      <div className="flex flex-col gap-1.5">
-        <span className="font-semibold">Population density</span>
-        <span className="text-xs text-muted">Residents per km² by census tract (ACS)</span>
-        <div className="grid h-2.5 grid-cols-4 overflow-hidden rounded-[3px]">
-          {DENSITY_COLORS.map((c) => <span key={c} style={{ background: c }} />)}
+      {risk ? <RiskScale planning={planning} /> : (
+        <div className="flex flex-col gap-1.5">
+          <span className="font-semibold">Population density</span>
+          <span className="text-xs text-muted">Residents per km² by census tract (ACS)</span>
+          <div className="grid h-2.5 grid-cols-4 overflow-hidden rounded-[3px]">
+            {DENSITY_COLORS.map((c) => <span key={c} style={{ background: c }} />)}
+          </div>
+          <div className="flex justify-between text-xs text-muted">
+            <span>{breaks ? '< ' + fmt(breaks[0]) : 'Lower'}</span>
+            <span>{breaks ? '≥ ' + fmt(breaks[breaks.length - 1]) : 'Higher'}</span>
+          </div>
         </div>
-        <div className="flex justify-between text-xs text-muted">
-          <span>{breaks ? '< ' + fmt(breaks[0]) : 'Lower'}</span>
-          <span>{breaks ? '≥ ' + fmt(breaks[breaks.length - 1]) : 'Higher'}</span>
-        </div>
-      </div>
+      )}
       <div className="flex flex-col gap-2 border-t border-divider pt-2.5 text-[13px]">
         <span className="flex items-center gap-2.5"><span className="h-[3px] w-[22px] rounded-sm bg-[#0039A6]" />Existing line (station to station)</span>
         <span className="flex items-center gap-2.5"><span className="mx-1.5 size-2.5 rounded-full border-2 border-[#3A414B] bg-white" />Existing station</span>
@@ -69,15 +128,15 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
   const el = useRef(null);
   const ref = useRef(null); // { map, layers, touched }
   const [breaks, setBreaks] = useState(null);
+  const [planning, setPlanning] = useState({ status: 'idle', model: null });
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
 
   useEffect(() => {
     const map = L.map(el.current, { zoomControl: false, preferCanvas: true, minZoom: 9, maxBounds: [[40.2, -74.7], [41.2, -73.3]] }).fitBounds(NYC_BOUNDS);
     L.tileLayer(TILE_URL, { attribution: ATTRIBUTION, maxZoom: 19 }).addTo(map);
-    map.createPane('overlays').style.zIndex = 450;
-    const layers = { density: L.layerGroup(), lines: L.layerGroup(), deserts: L.layerGroup(), walk: L.layerGroup(), stations: L.layerGroup() };
-    const state = { map, layers, touched: false };
+    const layers = { density: L.layerGroup(), risk: L.layerGroup(), lines: L.layerGroup(), deserts: L.layerGroup(), walk: L.layerGroup(), stations: L.layerGroup() };
+    const state = { map, layers, touched: false, tracts: null, planningRequested: false };
     ref.current = state;
 
     // The panel's size settles after fonts and data load; keep NYC framed until the user moves the map.
@@ -91,14 +150,17 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
     observer.observe(el.current);
 
     let cancelled = false;
+    const tracts = getJSON('/api/tracts');
+    state.tracts = tracts;
     Promise.all([
-      getJSON('/api/tracts'),
+      tracts,
       getJSON('/api/lines'),
       getJSON('/api/stations'),
       getJSON('/api/deserts'),
     ]).then(([tracts, lines, existing, deserts]) => {
       if (cancelled) return;
       addTracts(tracts, layers.density);
+      toBack(layers.density);
       addNetwork(lines, existing, deserts, layers);
       setBreaks(tracts.breaks);
     }).catch((e) => {
@@ -121,7 +183,7 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
     layers.stations.clearLayers();
     stations.forEach((st) => {
       const at = [st.latitude, st.longitude];
-      L.circle(at, { pane: 'overlays', radius: WALK_RADIUS_M, color: '#E5484D', opacity: 0.5, weight: 1, fillColor: '#E5484D', fillOpacity: 0.22 }).addTo(layers.walk);
+      L.circle(at, { radius: WALK_RADIUS_M, color: '#E5484D', opacity: 0.5, weight: 1, fillColor: '#E5484D', fillOpacity: 0.22 }).addTo(layers.walk);
       L.marker(at, {
         zIndexOffset: 1000,
         title: st.name,
@@ -134,11 +196,34 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
     });
   }, [stations]);
 
+  // The planning model is fit on first use (a few seconds), so load it only when its layer is turned on.
+  useEffect(() => {
+    const state = ref.current;
+    if (!visible.risk || state.planningRequested) return;
+    state.planningRequested = true;
+    setPlanning({ status: 'loading', model: null });
+    Promise.all([state.tracts, getJSON('/api/planning-model')]).then(([tracts, body]) => {
+      if (ref.current !== state) return;
+      addRisk(tracts, body, state.layers.risk);
+      toBack(state.layers.risk);
+      setPlanning({ status: 'ready', model: body.model });
+    }).catch((e) => {
+      if (ref.current !== state) return;
+      state.planningRequested = false;
+      setPlanning({ status: 'error', model: null });
+      onErrorRef.current('Could not load the planning model: ' + e.message);
+    });
+  }, [visible.risk]);
+
   useEffect(() => {
     const { map, layers } = ref.current;
-    const on = { density: visible.density, lines: visible.lines, deserts: visible.deserts, walk: show && visible.walk, stations: show && visible.stations };
+    // Risk and density both shade tracts; risk wins while it is on.
+    const on = { density: visible.density && !visible.risk, risk: visible.risk, lines: visible.lines, deserts: visible.deserts, walk: show && visible.walk, stations: show && visible.stations };
     Object.keys(on).forEach((k) => {
-      if (on[k] && !map.hasLayer(layers[k])) layers[k].addTo(map);
+      if (on[k] && !map.hasLayer(layers[k])) {
+        layers[k].addTo(map);
+        if (k === 'density' || k === 'risk') toBack(layers[k]);
+      }
       if (!on[k] && map.hasLayer(layers[k])) map.removeLayer(layers[k]);
     });
   }, [show, visible]);
@@ -153,7 +238,7 @@ export default function MapPanel({ stations, show, layers: visible, onError }) {
   return (
     <section aria-label="Map" className="relative min-h-[560px] min-w-0 flex-[999_1_520px] overflow-hidden rounded-[14px] border border-line bg-water">
       <div ref={el} className="absolute inset-0 z-0" />
-      <Legend breaks={breaks} />
+      <Legend breaks={breaks} risk={visible.risk} planning={planning} />
       <div className="absolute right-3.5 bottom-[30px] z-[1000] flex flex-col overflow-hidden rounded-[10px] bg-white shadow-[0_2px_10px_rgba(18,22,28,0.10)]">
         <button type="button" aria-label="Zoom in" onClick={() => zoom(1)} className={zoomButton}><PlusIcon /></button>
         <button type="button" aria-label="Zoom out" onClick={() => zoom(-1)} className={zoomButton + ' border-t border-divider'}><MinusIcon /></button>
