@@ -19,11 +19,18 @@ tracts = data.tracts
 
 ## Frontend
 
+The UI is a React + Tailwind CSS app built with Vite (Node 20+):
+
 ```sh
+cd frontend && npm install && npm run build && cd ..
 python -m backend.server  # then open http://127.0.0.1:8000
 ```
 
-`backend/server.py` (standard library only) serves `frontend/` and JSON
+For live reload, keep the server running and use `cd frontend && npm run dev`
+(http://localhost:5173, which proxies `/api` to port 8000). Components live in
+`frontend/src/components`; theme colors are Tailwind tokens in `src/index.css`.
+
+`backend/server.py` (standard library only) serves `frontend/dist` and JSON
 endpoints built in `backend/api.py`; data is loaded once per process:
 
 - `/api/summary`: headline counts from `load_data`.
@@ -36,8 +43,8 @@ endpoints built in `backend/api.py`; data is loaded once per process:
 - `/api/recommendations?goal=access|eff&n=1..10&along=1|0&spacing=km&budget=Low|Medium|High`:
   `backend/optimizer.py` output (below).
 
-The map is Leaflet 1.9.4 (from cdnjs) on OpenStreetMap tiles. OSM's volunteer
-tile servers suit development only; switch `TILE_URL` in `frontend/app.js` to a
+The map is Leaflet 1.9.4 (npm) on OpenStreetMap tiles. OSM's volunteer
+tile servers suit development only; switch `TILE_URL` in `frontend/src/components/MapPanel.jsx` to a
 tile provider or self-hosted tiles before heavy use.
 
 ### Existing line network (`backend/network.py`)
@@ -454,3 +461,42 @@ of them Snowflake cannot read with `TRY_TO_GEOGRAPHY`, which is the check
 
 If Cortex says the model is not available, set `SNOWFLAKE_CORTEX_MODEL` in `.env`
 to another model or turn on cross-region inference near the end of `setup.sql`.
+
+## Snowflake planning copilot
+
+The Copilot panel answers planners' questions with Snowflake Cortex, grounded in
+the same data and models the app serves.
+
+**One-time setup** (Snowflake account with `AI_COMPLETE`; new accounts cannot use
+the legacy `SNOWFLAKE.CORTEX.COMPLETE`):
+
+1. Generate a key pair for the service user (the private key stays local):
+   `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out ~/.snowflake/keys/subway_app_rsa_key.p8`
+2. Run `snowflake/copilot_setup.sql` as ACCOUNTADMIN with the public key filled in. It
+   creates `SUBWAY_WH`, `SUBWAY.APP`, the `SUBWAY_APP` role (loads tables, owns
+   the search service), the read-only `SUBWAY_READER` role (with
+   `SNOWFLAKE.CORTEX_USER`) and the key-pair service user `SUBWAY_APP_SVC`.
+3. Add a `[subway_app]` profile to `~/.snowflake/connections.toml` (account,
+   `user = "SUBWAY_APP_SVC"`, `authenticator = "SNOWFLAKE_JWT"`,
+   `private_key_file`, role, warehouse, database `SUBWAY`, schema `APP`), or
+   point `SNOWFLAKE_CONNECTION_NAME` at another profile.
+4. `python -m backend.snowflake_store` loads `TRACTS` (with a `GEOGRAPHY`
+   column), `STATIONS` (point `LOCATION`), `LINES`, the `NEIGHBORHOODS` view and
+   about 3,100 text `PROFILES` (neighborhoods, tracts, stations, lines, method
+   notes), and creates the Cortex Search service `SUBWAY.APP.PLANNING_SEARCH`.
+   Rerun it whenever the data or models change.
+
+**Per question** (`POST /api/chat`, `backend/copilot.py`):
+
+1. Cortex Search retrieves the six most relevant profiles.
+2. `AI_COMPLETE` (`claude-sonnet-4-5`) drafts at most one SELECT over the
+   planning tables, or declines. A guard allows a single SELECT/WITH without
+   DML, DDL or session commands, and it runs as `SUBWAY_READER` with secondary
+   roles off, a 20-second timeout and 50 rows.
+3. `AI_COMPLETE` answers from the profiles, the query result and the
+   recommendations currently shown in the app (sent with self-describing field
+   names), and the response lists its sources and SQL.
+
+Answers take about 10 to 15 seconds (two model calls). Unit tests cover the SQL
+guard and parsing; `SNOWFLAKE_LIVE_TESTS=1 python -m unittest tests.test_copilot`
+also calls Snowflake.

@@ -1,0 +1,163 @@
+import { useEffect, useRef, useState } from 'react';
+import L from 'leaflet';
+import { fmt, getJSON } from '../lib/api.js';
+import { MinusIcon, PlusIcon } from './icons.jsx';
+
+// OpenStreetMap's volunteer tile servers are fine for development; use a tile
+// provider or self-hosted tiles before heavy use (operations.osmfoundation.org/policies/tiles).
+export const TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const NYC_BOUNDS = [[40.49, -74.26], [40.92, -73.70]];
+const DENSITY_COLORS = ['#E4E0F7', '#C4BEEC', '#9B91DD', '#6E62C8'];
+const WALK_RADIUS_M = 800;
+
+function densityColor(breaks, d) {
+  const i = breaks.findIndex((b) => d < b);
+  return DENSITY_COLORS[i < 0 ? DENSITY_COLORS.length - 1 : i];
+}
+
+function addTracts(tracts, group) {
+  L.geoJSON(tracts, {
+    style: (f) => ({ color: '#FFFFFF', weight: 0.3, fillOpacity: f.properties.density == null ? 0 : 0.6, fillColor: densityColor(tracts.breaks, f.properties.density) }),
+    onEachFeature: (f, layer) => layer.bindTooltip(f.properties.density == null
+      ? 'Tract ' + f.properties.geoid + ': no population estimate'
+      : 'Tract ' + f.properties.geoid + ': ' + fmt(f.properties.population) + ' residents · ' + fmt(f.properties.density) + ' per km²', { sticky: true }),
+  }).addTo(group);
+}
+
+function addNetwork(lines, existing, deserts, layers) {
+  L.geoJSON(lines, {
+    pane: 'overlays',
+    style: (f) => ({ color: f.properties.color, weight: 3, opacity: 0.9, lineCap: 'round', lineJoin: 'round' }),
+    onEachFeature: (f, layer) => layer.bindTooltip(f.properties.line + (f.properties.routes.length ? ' (' + f.properties.routes.join(', ') + ')' : ''), { sticky: true }),
+  }).addTo(layers.lines);
+  existing.stations.forEach((st) => L.circleMarker([st.latitude, st.longitude], { pane: 'overlays', radius: 2.5, color: '#3A414B', weight: 1, fillColor: '#FFFFFF', fillOpacity: 1 })
+    .bindTooltip(st.name).addTo(layers.lines));
+  L.geoJSON(deserts, {
+    pane: 'overlays',
+    style: { color: '#C4363B', weight: 1.5, dashArray: '5 5', fillColor: '#E5484D', fillOpacity: 0.08 },
+  }).bindTooltip(deserts.tracts + ' residential tracts, ' + fmt(deserts.population) + ' residents, beyond ' + deserts.threshold_km + ' km of a station', { sticky: true })
+    .addTo(layers.deserts);
+}
+
+function Legend({ breaks }) {
+  return (
+    <div className="absolute top-3.5 left-3.5 z-[1000] flex w-[220px] flex-col gap-2.5 rounded-xl bg-white px-4 py-3.5 shadow-[0_2px_10px_rgba(18,22,28,0.10)]">
+      <div className="flex flex-col gap-1.5">
+        <span className="font-semibold">Population density</span>
+        <span className="text-xs text-muted">Residents per km² by census tract (ACS)</span>
+        <div className="grid h-2.5 grid-cols-4 overflow-hidden rounded-[3px]">
+          {DENSITY_COLORS.map((c) => <span key={c} style={{ background: c }} />)}
+        </div>
+        <div className="flex justify-between text-xs text-muted">
+          <span>{breaks ? '< ' + fmt(breaks[0]) : 'Lower'}</span>
+          <span>{breaks ? '≥ ' + fmt(breaks[breaks.length - 1]) : 'Higher'}</span>
+        </div>
+      </div>
+      <div className="flex flex-col gap-2 border-t border-divider pt-2.5 text-[13px]">
+        <span className="flex items-center gap-2.5"><span className="h-[3px] w-[22px] rounded-sm bg-[#0039A6]" />Existing line (station to station)</span>
+        <span className="flex items-center gap-2.5"><span className="mx-1.5 size-2.5 rounded-full border-2 border-[#3A414B] bg-white" />Existing station</span>
+        <span className="flex items-center gap-2.5"><span className="mx-1 size-3.5 rounded-full border-2 border-white bg-rec shadow-[0_0_0_1px_#E5484D]" />Recommended station</span>
+        <span className="flex items-center gap-2.5"><span className="mx-0.5 size-[18px] rounded-full border border-rec/50 bg-rec/20" />10-min walk area (≈800 m)</span>
+        <span className="flex items-center gap-2.5"><span className="h-3.5 w-[22px] rounded-full border-[1.5px] border-dashed border-error" />Transit desert (&gt; 15-min walk)</span>
+      </div>
+    </div>
+  );
+}
+
+export default function MapPanel({ stations, show, layers: visible, onError }) {
+  const el = useRef(null);
+  const ref = useRef(null); // { map, layers, touched }
+  const [breaks, setBreaks] = useState(null);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
+
+  useEffect(() => {
+    const map = L.map(el.current, { zoomControl: false, preferCanvas: true, minZoom: 9, maxBounds: [[40.2, -74.7], [41.2, -73.3]] }).fitBounds(NYC_BOUNDS);
+    L.tileLayer(TILE_URL, { attribution: ATTRIBUTION, maxZoom: 19 }).addTo(map);
+    map.createPane('overlays').style.zIndex = 450;
+    const layers = { density: L.layerGroup(), lines: L.layerGroup(), deserts: L.layerGroup(), walk: L.layerGroup(), stations: L.layerGroup() };
+    const state = { map, layers, touched: false };
+    ref.current = state;
+
+    // The panel's size settles after fonts and data load; keep NYC framed until the user moves the map.
+    map.on('dragstart', () => { state.touched = true; });
+    const onWheel = () => { state.touched = true; };
+    el.current.addEventListener('wheel', onWheel, { passive: true });
+    const observer = new ResizeObserver(() => {
+      map.invalidateSize();
+      if (!state.touched) map.fitBounds(NYC_BOUNDS, { animate: false });
+    });
+    observer.observe(el.current);
+
+    let cancelled = false;
+    Promise.all([
+      getJSON('/api/tracts'),
+      getJSON('/api/lines'),
+      getJSON('/api/stations'),
+      getJSON('/api/deserts'),
+    ]).then(([tracts, lines, existing, deserts]) => {
+      if (cancelled) return;
+      addTracts(tracts, layers.density);
+      addNetwork(lines, existing, deserts, layers);
+      setBreaks(tracts.breaks);
+    }).catch((e) => {
+      if (!cancelled) onErrorRef.current('Could not load map layers: ' + e.message);
+    });
+
+    const node = el.current;
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      node.removeEventListener('wheel', onWheel);
+      map.remove();
+      ref.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const { layers } = ref.current;
+    layers.walk.clearLayers();
+    layers.stations.clearLayers();
+    stations.forEach((st) => {
+      const at = [st.latitude, st.longitude];
+      L.circle(at, { pane: 'overlays', radius: WALK_RADIUS_M, color: '#E5484D', opacity: 0.5, weight: 1, fillColor: '#E5484D', fillOpacity: 0.22 }).addTo(layers.walk);
+      L.marker(at, {
+        zIndexOffset: 1000,
+        title: st.name,
+        icon: L.divIcon({
+          className: 'rec-marker',
+          iconSize: [24, 24],
+          html: '<span style="width: 24px; height: 24px; border-radius: 50%; background: #E5484D; border: 2.5px solid #FFFFFF; box-sizing: border-box; color: #FFFFFF; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(18,22,28,0.3)">' + st.rank + '</span>',
+        }),
+      }).bindTooltip(st.rank + '. ' + st.name + ' — ' + st.near).addTo(layers.stations);
+    });
+  }, [stations]);
+
+  useEffect(() => {
+    const { map, layers } = ref.current;
+    const on = { density: visible.density, lines: visible.lines, deserts: visible.deserts, walk: show && visible.walk, stations: show && visible.stations };
+    Object.keys(on).forEach((k) => {
+      if (on[k] && !map.hasLayer(layers[k])) layers[k].addTo(map);
+      if (!on[k] && map.hasLayer(layers[k])) map.removeLayer(layers[k]);
+    });
+  }, [show, visible]);
+
+  const zoom = (delta) => {
+    const state = ref.current;
+    state.touched = true;
+    state.map.setZoom(state.map.getZoom() + delta);
+  };
+
+  const zoomButton = 'flex size-11 cursor-pointer items-center justify-center bg-white hover:bg-page';
+  return (
+    <section aria-label="Map" className="relative min-h-[560px] min-w-0 flex-[999_1_520px] overflow-hidden rounded-[14px] border border-line bg-water">
+      <div ref={el} className="absolute inset-0 z-0" />
+      <Legend breaks={breaks} />
+      <div className="absolute right-3.5 bottom-[30px] z-[1000] flex flex-col overflow-hidden rounded-[10px] bg-white shadow-[0_2px_10px_rgba(18,22,28,0.10)]">
+        <button type="button" aria-label="Zoom in" onClick={() => zoom(1)} className={zoomButton}><PlusIcon /></button>
+        <button type="button" aria-label="Zoom out" onClick={() => zoom(-1)} className={zoomButton + ' border-t border-divider'}><MinusIcon /></button>
+      </div>
+    </section>
+  );
+}

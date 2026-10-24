@@ -9,9 +9,11 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import api
+from . import api, copilot
 
-FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
+MAX_BODY = 64 * 1024
+# The React app is built into frontend/dist (cd frontend && npm install && npm run build).
+FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend" / "dist"
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -44,6 +46,23 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(500, {"error": f"{type(error).__name__}: {error}"})
         self._json(200, body)
 
+    def do_POST(self):
+        if urlparse(self.path).path != "/api/chat":
+            return self._json(404, {"error": "not found"})
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if not 0 < length <= MAX_BODY:
+                raise ValueError(f"request body must be 1 to {MAX_BODY} bytes")
+            request = json.loads(self.rfile.read(length))
+            if not isinstance(request, dict):
+                raise ValueError("request body must be a JSON object")
+            body = copilot.ask(request.get("question"), request.get("recommendations"), request.get("history"))
+        except ValueError as error:
+            return self._json(400, {"error": str(error)})
+        except Exception as error:  # e.g. Snowflake not configured or unreachable
+            return self._json(503, {"error": f"Copilot unavailable: {type(error).__name__}: {str(error)[:200]}"})
+        self._json(200, body)
+
     def _json(self, status, body):
         payload = json.dumps(body, separators=(",", ":")).encode()
         self.send_response(status)
@@ -58,6 +77,8 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
+    if not FRONTEND_DIR.is_dir():
+        print(f"{FRONTEND_DIR} is missing; build it with: cd frontend && npm install && npm run build")
     server = ThreadingHTTPServer((args.host, args.port), partial(Handler, directory=str(FRONTEND_DIR)))
     print(f"Serving http://{args.host}:{args.port}")
     server.serve_forever()
