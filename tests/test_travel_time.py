@@ -4,7 +4,8 @@ import numpy as np
 
 from backend.data_loader import load_data
 from backend.network import build_lines
-from backend.travel_time import _walk_minutes, station_minutes_to_jobs, transit_minutes_to_jobs
+from backend.travel_time import (_walk_minutes, station_minutes_to_jobs, tract_minutes_matrix,
+                                 transit_minutes_to_jobs)
 
 
 class TravelTimeTests(unittest.TestCase):
@@ -35,6 +36,18 @@ class TravelTimeTests(unittest.TestCase):
         self.assertTrue(minutes[valid].gt(0).all())
         self.assertTrue(minutes[~valid].isna().all())
         self.assertAlmostEqual(_walk_minutes(1.0), 1.3 / 4.8 * 60)
+
+    def test_tract_matrix(self):
+        tracts = self.data.tracts
+        minutes = tract_minutes_matrix(tracts, self.data)
+        valid = tracts.geometry_status.eq("valid").to_numpy()
+        self.assertEqual(minutes.shape, (len(tracts), len(tracts)))
+        inner = minutes[np.ix_(valid, valid)]
+        self.assertTrue(np.isfinite(inner).all())
+        self.assertTrue(np.isnan(minutes[~valid]).all())
+        self.assertTrue((np.diag(inner) == 0).all())
+        # Same walks and rides both ways, so the matrix is symmetric.
+        self.assertTrue(np.allclose(inner, inner.T))
 
 
 if __name__ == "__main__":

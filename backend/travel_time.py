@@ -98,6 +98,39 @@ def station_minutes_to_jobs(stations, lines, entrances):
     return dijkstra(graph, directed=False, indices=sources, min_only=True)
 
 
+def _access(lat, lon, slat, slon):
+    """Nearest station positions and walking minutes to them, for valid points."""
+    km = haversine_km(lat[:, None], lon[:, None], slat[None, :], slon[None, :])
+    nearest = np.argsort(km, axis=1)[:, :NEAREST_STATIONS]
+    return nearest, _walk_minutes(np.take_along_axis(km, nearest, axis=1))
+
+
+def tract_minutes_matrix(tracts, data):
+    """Square array of minutes between valid tracts, in tracts row order.
+
+    Walk to one of the origin's nearest stations, ride, walk from one of the
+    destination's; tracts close enough to walk between use the walk if quicker.
+    Rows and columns of tracts without a valid point are NaN.
+    """
+    stations, lines = build_lines(data.stations, data.entrances)
+    slat = stations.latitude.to_numpy("float64")
+    slon = stations.longitude.to_numpy("float64")
+    between = dijkstra(_graph(slat, slon, lines, data.entrances), directed=False)
+    lat = pd.to_numeric(tracts.latitude, errors="coerce").to_numpy("float64")
+    lon = pd.to_numeric(tracts.longitude, errors="coerce").to_numpy("float64")
+    valid = np.flatnonzero(np.isfinite(lat) & np.isfinite(lon))
+    nearest, walk = _access(lat[valid], lon[valid], slat, slon)
+    minutes = np.full((len(valid), len(valid)), np.inf)
+    for a in range(nearest.shape[1]):
+        for b in range(nearest.shape[1]):
+            minutes = np.minimum(minutes, walk[:, a, None] + between[nearest[:, a][:, None], nearest[None, :, b]]
+                                 + walk[None, :, b])
+    direct = haversine_km(lat[valid, None], lon[valid, None], lat[None, valid], lon[None, valid])
+    result = np.full((len(tracts), len(tracts)), np.nan)
+    result[np.ix_(valid, valid)] = np.minimum(minutes, _walk_minutes(direct))
+    return result
+
+
 def transit_minutes_to_jobs(tracts, data):
     """Series of estimated minutes from each tract's interior point; NaN without a valid point."""
     stations, lines = build_lines(data.stations, data.entrances)
@@ -110,8 +143,6 @@ def transit_minutes_to_jobs(tracts, data):
     valid = np.flatnonzero(np.isfinite(lat) & np.isfinite(lon))
     for start in range(0, len(valid), 256):
         positions = valid[start:start + 256]
-        km = haversine_km(lat[positions, None], lon[positions, None], slat[None, :], slon[None, :])
-        nearest = np.argsort(km, axis=1)[:, :NEAREST_STATIONS]
-        walk = _walk_minutes(np.take_along_axis(km, nearest, axis=1))
+        nearest, walk = _access(lat[positions], lon[positions], slat, slon)
         result[positions] = (walk + to_jobs[nearest]).min(axis=1)
     return pd.Series(result, index=tracts.index, name="transit_minutes_to_jobs")

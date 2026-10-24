@@ -18,6 +18,10 @@ def synthetic(n=200, seed=0):
         "population_density_km2": rng.uniform(1000, 30000, n),
         "median_household_income": rng.uniform(20000, 200000, n),
         "transit_minutes_to_jobs": 10 + distance * 15 + rng.uniform(0, 5, n),
+        "job_minutes_mean": 20 + distance * 10 + rng.uniform(0, 5, n),
+        "job_share_over_45": np.clip(distance / 5 + rng.uniform(-0.1, 0.1, n), 0, 1),
+        "job_share_over_60": np.clip(distance / 7, 0, 1), "job_share_manhattan": rng.uniform(0, 1, n),
+        "job_share_outside_nyc": rng.uniform(0, 0.3, n),
         "BoroName": boroughs[np.arange(n) % 5],
         "latitude": 40.7 + rng.uniform(0, 0.2, n), "longitude": -73.9 + rng.uniform(0, 0.2, n),
         "priority_score": distance / 5,
@@ -33,10 +37,10 @@ def synthetic(n=200, seed=0):
 class SyntheticSupervisedTests(unittest.TestCase):
     def test_learnable_signal_beats_random(self):
         result = evaluate(synthetic()).set_index("method")
-        models = {f"{m}:{f}" for m in ("logistic_regression", "gradient_boosting")
-                  for f in ("clustering_features", "plus_travel_time", "plus_location")}
+        models = {f"{m}:{f}" for m in ("logistic_regression", "gradient_boosting", "ensemble")
+                  for f in ("clustering_features", "plus_travel_time", "plus_job_destinations", "plus_location")}
         self.assertEqual(set(result.index), models | {"cluster", "priority_score", "distance_only",
-                                                      "transit_minutes_only"})
+                                                      "transit_minutes_only", "job_share_over_45_only"})
         self.assertGreater(result.loc["logistic_regression:plus_travel_time", "roc_auc"], 0.85)
         self.assertGreater(result.loc["distance_only", "roc_auc"], 0.85)
         self.assertTrue(result.roc_auc_confident.between(0, 1).all())
@@ -44,9 +48,10 @@ class SyntheticSupervisedTests(unittest.TestCase):
     def test_feature_matrix(self):
         frame = synthetic(10)
         self.assertEqual(feature_matrix(frame, "clustering_features").shape, (10, 3))
+        self.assertEqual(feature_matrix(frame, "plus_job_destinations").shape, (10, 9))
         x = feature_matrix(frame, "plus_location")
-        self.assertEqual(x.shape, (10, 4 + 5 + 2))
-        self.assertTrue((x[:, 4:9].sum(axis=1) == 1).all())
+        self.assertEqual(x.shape, (10, 9 + 5 + 2))
+        self.assertTrue((x[:, 9:14].sum(axis=1) == 1).all())
         self.assertAlmostEqual(x[0, 3], np.log(frame.transit_minutes_to_jobs.iloc[0]))
 
     def test_deterministic(self):
@@ -65,16 +70,19 @@ class RealSupervisedTests(unittest.TestCase):
     def setUpClass(cls):
         cls.frame = training_frame()
         # One feature set and three folds keep this test quick; main() runs them all.
-        cls.result = evaluate(cls.frame, n_splits=3, feature_sets=("plus_travel_time",))
+        cls.result = evaluate(cls.frame, n_splits=3, feature_sets=("plus_job_destinations",))
 
     def test_frame_and_metrics(self):
         self.assertFalse(self.frame.GEOID.duplicated().any())
         self.assertTrue(self.frame.underserved.notna().all())
-        self.assertEqual(len(self.result), 6)
+        self.assertEqual(len(self.result), 8)
         self.assertTrue(self.frame.transit_minutes_to_jobs.gt(0).all())
         # Travel time carries real signal on the confident labels.
         result = self.result.set_index("method")
         self.assertGreater(result.loc["transit_minutes_only", "roc_auc_confident"], 0.75)
+        # Knowing where residents work beats travel time to Manhattan alone.
+        self.assertGreater(result.loc["logistic_regression:plus_job_destinations", "roc_auc"],
+                           result.loc["transit_minutes_only", "roc_auc"])
 
     def test_cluster_summary_covers_frame(self):
         summary = cluster_gold_summary(self.frame)

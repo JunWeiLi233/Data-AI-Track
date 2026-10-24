@@ -7,11 +7,14 @@ Single-number rankings, no training:
 - priority_score: Emily's rule-based formula;
 - distance_only: nearest station distance;
 - transit_minutes_only: estimated subway trip to the job centers
-  (backend/travel_time.py).
+  (backend/travel_time.py);
+- job_share_over_45_only: share of residents' jobs over 45 subway minutes
+  away (backend/job_destinations.py).
 - cluster: the k-means groups, ranked by their underserved rate in the
   training folds only.
 
-Trained models, one per FEATURE_SETS entry, with out-of-fold predictions.
+Trained models, one per FEATURE_SETS entry, with out-of-fold predictions;
+ensemble averages the logistic regression and gradient boosting ranks.
 Hyperparameters are chosen by an inner grouped search inside each training
 fold, so the test fold never influences them.
 
@@ -25,6 +28,7 @@ import argparse
 
 import numpy as np
 import pandas as pd
+from scipy.stats import rankdata
 from sklearn.base import clone
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
@@ -36,6 +40,7 @@ from sklearn.preprocessing import StandardScaler
 from .clustering import cluster_tracts
 from .data_loader import load_data
 from .gold_labels import build_gold_labels
+from .job_destinations import FEATURES as JOB_DESTINATION_FEATURES, job_destination_features
 from .scoring import score_tracts
 from .travel_time import transit_minutes_to_jobs
 
@@ -43,12 +48,15 @@ from .travel_time import transit_minutes_to_jobs
 CLUSTERING_FEATURES = {"nearest_station_distance_km": "log1p", "population_density_km2": "log",
                        "median_household_income": "log"}
 TRAVEL_FEATURES = {**CLUSTERING_FEATURES, "transit_minutes_to_jobs": "log"}
+JOB_FEATURES = {**TRAVEL_FEATURES, "job_minutes_mean": "log", "job_share_over_45": "raw",
+                "job_share_over_60": "raw", "job_share_manhattan": "raw", "job_share_outside_nyc": "raw"}
 FEATURE_SETS = {
     "clustering_features": CLUSTERING_FEATURES,
     "plus_travel_time": TRAVEL_FEATURES,
+    "plus_job_destinations": JOB_FEATURES,
     # Where the tract is: lets a model learn patterns the network misses
     # (express buses, ferries, car commuting), at some cost to explanation.
-    "plus_location": {**TRAVEL_FEATURES, "BoroName": "onehot", "latitude": "raw", "longitude": "raw"},
+    "plus_location": {**JOB_FEATURES, "BoroName": "onehot", "latitude": "raw", "longitude": "raw"},
 }
 BOROUGHS = ("Bronx", "Brooklyn", "Manhattan", "Queens", "Staten Island")
 DEFAULT_FEATURE_SET = "plus_location"
@@ -76,15 +84,20 @@ def feature_matrix(frame, feature_set=DEFAULT_FEATURE_SET):
     return np.column_stack(columns)
 
 
-def training_frame(data=None, gold=None):
-    """Clustered tracts with travel time, joined to gold labels; rows usable by every method."""
+def training_frame(data=None, gold=None, flows=None):
+    """Clustered tracts with travel and job features, joined to gold labels.
+
+    Keeps only rows usable by every method.
+    """
     data = load_data() if data is None else data
     gold = build_gold_labels() if gold is None else gold
     clustered = cluster_tracts(score_tracts(data))
     clustered["transit_minutes_to_jobs"] = transit_minutes_to_jobs(clustered, data)
+    clustered = clustered.join(job_destination_features(clustered, data, flows))
     frame = clustered.merge(gold, on="GEOID", how="left", validate="one_to_one")
     usable = (frame.cluster.notna() & frame.underserved.notna() & frame.priority_score.notna()
-              & frame.CDTA2020.notna() & frame.transit_minutes_to_jobs.gt(0))
+              & frame.CDTA2020.notna() & frame.transit_minutes_to_jobs.gt(0)
+              & frame.job_minutes_mean.gt(0) & frame[list(JOB_DESTINATION_FEATURES)].notna().all(axis=1))
     return frame[usable].sort_values("GEOID").reset_index(drop=True)
 
 
@@ -103,6 +116,7 @@ def out_of_fold_scores(frame, n_splits=DEFAULT_SPLITS, feature_sets=tuple(FEATUR
     scores = {"priority_score": frame.priority_score.to_numpy(dtype="float64"),
               "distance_only": frame.nearest_station_distance_km.to_numpy(dtype="float64"),
               "transit_minutes_only": frame.transit_minutes_to_jobs.to_numpy(dtype="float64"),
+              "job_share_over_45_only": frame.job_share_over_45.to_numpy(dtype="float64"),
               "cluster": np.full(len(frame), np.nan)}
     for feature_set in feature_sets:
         for model in MODELS:
@@ -115,6 +129,10 @@ def out_of_fold_scores(frame, n_splits=DEFAULT_SPLITS, feature_sets=tuple(FEATUR
             for name, model in MODELS.items():
                 fitted = clone(model).set_params(cv=inner).fit(x[train], y[train])
                 scores[f"{name}:{feature_set}"][test] = fitted.predict_proba(x[test])[:, 1]
+    for feature_set in feature_sets:
+        # Ranks are pooled over all folds; fine for AUC, which only compares ranks.
+        scores[f"ensemble:{feature_set}"] = (rankdata(scores[f"logistic_regression:{feature_set}"])
+                                             + rankdata(scores[f"gradient_boosting:{feature_set}"])) / 2
     return pd.DataFrame(scores, index=frame.index)
 
 

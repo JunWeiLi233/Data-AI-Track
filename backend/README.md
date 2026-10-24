@@ -339,29 +339,47 @@ ferry for Staten Island. Waits, frequency and buses are not modeled, so these
 are rough planning estimates (149 St–Grand Concourse about 20 min, Tottenville
 about 82 min).
 
+### Where residents work (`backend/job_destinations.py`)
+
+Travel time to Manhattan assumes everyone works there; only 44% of NYC
+residents' jobs are in Manhattan. LEHD LODES 2023 origin-destination data gives, for each home
+tract, how many residents work in each other tract (from unemployment-insurance
+records, not the ACS commute questions behind the labels).
+`data/raw/lodes_flows.csv.gz` (3.4 MB) holds 1.05M home→work tract pairs and
+3.7M jobs; work outside NYC keeps only its state (New York State, New Jersey,
+Connecticut). Combined with `tract_minutes_matrix`, the subway minutes between
+every pair of tracts, it yields five features per tract: jobs-weighted mean
+minutes, shares of jobs over 45 and over 60 minutes away, and shares in
+Manhattan and outside NYC. Refresh with
+`python -m backend.job_destinations --download`.
+
 ### Results
 
-`backend.supervised` trains logistic regression and gradient boosting on three
-feature sets: the clustering features; those plus travel time; and those plus
-borough and coordinates. Hyperparameters are tuned inside each training fold.
-Folds are grouped by community district (`CDTA2020`), so a model is never tested
-on the neighbours it trained on. With the current data:
+`backend.supervised` trains logistic regression and gradient boosting on four
+nested feature sets: the clustering features; plus travel time; plus where
+residents work; plus borough and coordinates. An ensemble averages the two
+models' ranks. Hyperparameters are tuned inside each training fold, and folds
+are grouped by community district (`CDTA2020`), so a model is never tested on
+the neighbours it trained on. With the current data:
 
 | Method | ROC AUC | ROC AUC, confident labels | Underserved in top quarter |
 |---|---:|---:|---:|
-| Gradient boosting, plus location | 0.73 | 0.85 | 39% |
-| Logistic regression, plus location | 0.72 | 0.82 | 39% |
+| Logistic regression, plus location | 0.77 | 0.89 | 46% |
+| Logistic regression, plus job destinations | 0.75 | 0.87 | 45% |
+| Share of jobs 45+ minutes away, alone | 0.72 | 0.84 | 36% |
 | Gradient boosting, plus travel time | 0.71 | 0.82 | 39% |
-| Travel time alone | 0.70 | 0.81 | 35% |
-| Logistic regression, clustering features | 0.61 | 0.70 | 30% |
+| Travel time to Manhattan, alone | 0.70 | 0.81 | 35% |
+| Logistic regression, clustering features only | 0.61 | 0.70 | 30% |
 | Distance only | 0.61 | 0.70 | 35% |
 | k-means groups | 0.56 | 0.61 | 25% |
 | Priority score | 0.55 | 0.60 | 29% |
 
-Random ranking scores 0.5 and 25%. Travel time is the feature that matters:
-alone it beats every method built on distance, density and income. Borough and
-coordinates add a little more, but they make the model harder to explain.
-The priority score and the k-means groups agree least with the gold labels.
+Random ranking scores 0.5 and 25%. What predicts long commutes is how far
+residents' jobs are by subway: first the trip to Manhattan, then the trip to
+where they actually work. Borough and coordinates add a little more but make
+the model harder to explain. Feeder buses, more job centers, weighting
+confident labels and ensembling each changed ROC AUC by 0.01 or less. The
+priority score and the k-means groups agree least with the gold labels.
 Group 0 (near the subway, higher income) is rarely underserved (10%), but
 groups 1–3 are all about 30%.
 
