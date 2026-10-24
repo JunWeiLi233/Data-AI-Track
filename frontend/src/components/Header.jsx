@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { getJSON } from '../lib/api.js';
-import { SearchIcon, TrainIcon } from './icons.jsx';
+import { useEffect, useRef, useState } from 'react';
+import { TrainIcon } from './icons.jsx';
 import { OPEN_COPILOT } from './Copilot.jsx';
 
 const SECTIONS = [
@@ -26,78 +25,7 @@ function useActiveSection() {
   return [active, setActive];
 }
 
-// Searches existing stations (loaded on first use) and the current recommendations.
-function Search({ recommended, onFocus }) {
-  const [query, setQuery] = useState('');
-  const [open, setOpen] = useState(false);
-  const [existing, setExisting] = useState(null);
-  const box = useRef(null);
-
-  useEffect(() => {
-    const close = (e) => { if (box.current && !box.current.contains(e.target)) setOpen(false); };
-    document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
-  }, []);
-
-  const load = () => {
-    if (!existing) getJSON('/api/stations').then((d) => setExisting(d.stations)).catch(() => setExisting([]));
-  };
-
-  const results = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (q.length < 2) return [];
-    const rec = recommended
-      .filter((s) => (s.name + ' ' + s.near + ' ' + s.borough).toLowerCase().includes(q))
-      .map((s) => ({ key: 'r' + s.rank, label: s.name, sub: 'Recommended station #' + s.rank + ' · ' + s.borough, lat: s.latitude, lon: s.longitude, rec: true }));
-    const seen = new Set();
-    const old = (existing || []).filter((s) => s.name.toLowerCase().includes(q) && !seen.has(s.name) && seen.add(s.name)).slice(0, 6)
-      .map((s, i) => ({ key: 'e' + i + s.name, label: s.name, sub: 'Existing station', lat: s.latitude, lon: s.longitude }));
-    return [...rec, ...old].slice(0, 8);
-  }, [query, recommended, existing]);
-
-  const pick = (r) => {
-    onFocus({ lat: r.lat, lon: r.lon, label: r.label });
-    setQuery(r.label);
-    setOpen(false);
-    document.getElementById('explore')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
-
-  return (
-    <div ref={box} className="relative min-w-[220px] flex-[0_1_360px]">
-      <label className="flex h-11 items-center gap-2.5 rounded-[10px] border border-field bg-white px-3.5 focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/25">
-        <SearchIcon />
-        <input
-          type="search"
-          aria-label="Search stations"
-          placeholder="Search a station or recommended area…"
-          value={query}
-          onFocus={() => { load(); setOpen(true); }}
-          onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && results[0]) pick(results[0]);
-            if (e.key === 'Escape') setOpen(false);
-          }}
-          className="min-w-0 flex-1 border-0 bg-transparent text-ink outline-none"
-        />
-      </label>
-      {open && query.trim().length >= 2 && (
-        <ul role="listbox" className="absolute top-12 right-0 left-0 z-[2000] m-0 list-none overflow-hidden rounded-[10px] border border-line bg-white p-1 shadow-lg">
-          {results.length === 0 && <li className="px-3 py-2.5 text-muted">{existing ? 'No stations match “' + query + '”.' : 'Searching…'}</li>}
-          {results.map((r) => (
-            <li key={r.key} role="option" aria-selected="false">
-              <button type="button" onClick={() => pick(r)} className="flex w-full cursor-pointer flex-col rounded-lg border-0 bg-transparent px-3 py-2 text-left hover:bg-accent-soft">
-                <span className="font-semibold text-ink">{r.label}</span>
-                <span className={'text-xs ' + (r.rec ? 'text-rec' : 'text-muted')}>{r.sub}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
-export default function Header({ recommended, onFocus }) {
+export default function Header() {
   const [active, setActive] = useActiveSection();
   const el = useRef(null);
   // Publish the header height so the sticky sidebar can sit right below it.
@@ -130,7 +58,6 @@ export default function Header({ recommended, onFocus }) {
           </a>
         ))}
       </nav>
-      <Search recommended={recommended} onFocus={onFocus} />
     </header>
   );
 }

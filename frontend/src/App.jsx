@@ -50,7 +50,6 @@ export default function App() {
   const [result, setResult] = useState({ stations: [], impact: null });
   const [status, setStatus] = useState({ text: '', error: false });
   const [summary, setSummary] = useState({ data: null, error: '' });
-  const [focus, setFocus] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const request = useRef(0);
   const debounce = useRef(0);
@@ -103,7 +102,7 @@ export default function App() {
   return (
     <div className="flex min-h-screen w-full flex-col">
       <a href="#explore" className="sr-only focus:not-sr-only focus:p-3">Skip to the map</a>
-      <Header recommended={result.stations} onFocus={(f) => setFocus({ ...f, id: Date.now() })} />
+      <Header />
       <div className="flex flex-1 items-start">
       {/* Controls live only in the sidebar: docked on large screens, a slide-out drawer on small ones. */}
       {sidebarOpen && <div aria-hidden="true" onClick={() => setSidebarOpen(false)} className="fixed inset-0 z-[3400] bg-ink/30 lg:hidden" />}
@@ -129,7 +128,7 @@ export default function App() {
       </button>
       <main className="flex min-w-0 flex-1 flex-col gap-4 p-4">
         <div id="explore" className="flex scroll-mt-24">
-          <MapPanel stations={result.stations} show={settings.show} layers={settings.l} focus={focus} onError={mapError} />
+          <MapPanel stations={result.stations} show={settings.show} layers={settings.l} onError={mapError} />
         </div>
         <ImpactCards impact={result.impact} stations={result.stations} />
         <Copilot recommendations={{ goal: settings.goal, constraints: { alongExistingLines: settings.c.along, minSpacingKm: settings.c.spacing ? settings.spacingKm : null, budget: settings.c.budget ? settings.budget : null }, stations: result.stations, impact: result.impact }} />

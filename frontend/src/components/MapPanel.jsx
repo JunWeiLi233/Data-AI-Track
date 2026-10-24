@@ -135,7 +135,7 @@ function Legend({ breaks }) {
   );
 }
 
-export default function MapPanel({ stations, show, layers: visible, focus, onError }) {
+export default function MapPanel({ stations, show, layers: visible, onError }) {
   const el = useRef(null);
   const ref = useRef(null); // { map, layers, touched }
   const [breaks, setBreaks] = useState(null);
@@ -225,16 +225,6 @@ export default function MapPanel({ stations, show, layers: visible, focus, onErr
       if (!on[k] && map.hasLayer(layers[k])) map.removeLayer(layers[k]);
     });
   }, [show, visible]);
-
-  // Fly to a station chosen from search or the recommendation list.
-  useEffect(() => {
-    if (!focus) return;
-    const state = ref.current;
-    state.touched = true;
-    state.map.flyTo([focus.lat, focus.lon], 15, { duration: 0.8 });
-    const pin = L.popup({ closeButton: false, offset: [0, -4] }).setLatLng([focus.lat, focus.lon]).setContent('<strong>' + focus.label.replace(/</g, '&lt;') + '</strong>').openOn(state.map);
-    return () => pin.remove();
-  }, [focus]);
 
   const zoom = (delta) => {
     const state = ref.current;
