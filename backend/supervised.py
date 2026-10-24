@@ -107,6 +107,18 @@ def _precision_at_top(y, score, share=TOP_SHARE):
     return float(y[order].mean())
 
 
+def grouped_folds(frame, n_splits=DEFAULT_SPLITS):
+    """(train, test) position arrays; no community district is on both sides."""
+    y = frame.underserved.astype("int64").to_numpy()
+    return list(GroupKFold(n_splits=n_splits).split(frame, y, frame.CDTA2020.to_numpy()))
+
+
+def fit_model(name, x, y, groups):
+    """Fit MODELS[name], tuning it with folds grouped like the outer ones."""
+    inner = list(GroupKFold(n_splits=INNER_SPLITS).split(x, y, groups))
+    return clone(MODELS[name]).set_params(cv=inner).fit(x, y)
+
+
 def out_of_fold_scores(frame, n_splits=DEFAULT_SPLITS, feature_sets=tuple(FEATURE_SETS)):
     """Return a DataFrame of out-of-fold ranking scores, one column per method."""
     y = frame.underserved.astype("int64").to_numpy()
@@ -121,13 +133,12 @@ def out_of_fold_scores(frame, n_splits=DEFAULT_SPLITS, feature_sets=tuple(FEATUR
     for feature_set in feature_sets:
         for model in MODELS:
             scores[f"{model}:{feature_set}"] = np.full(len(frame), np.nan)
-    for train, test in GroupKFold(n_splits=n_splits).split(frame, y, groups):
+    for train, test in grouped_folds(frame, n_splits):
         rates = pd.Series(y[train]).groupby(cluster[train]).mean()
         scores["cluster"][test] = pd.Series(cluster[test]).map(rates).fillna(y[train].mean()).to_numpy()
-        inner = list(GroupKFold(n_splits=INNER_SPLITS).split(train, y[train], groups[train]))
         for feature_set, x in matrices.items():
-            for name, model in MODELS.items():
-                fitted = clone(model).set_params(cv=inner).fit(x[train], y[train])
+            for name in MODELS:
+                fitted = fit_model(name, x[train], y[train], groups[train])
                 scores[f"{name}:{feature_set}"][test] = fitted.predict_proba(x[test])[:, 1]
     for feature_set in feature_sets:
         # Ranks are pooled over all folds; fine for AUC, which only compares ranks.
